@@ -32,13 +32,46 @@ esc = html.escape
 
 # ---------------------------------------------------------------- Todoist ---
 def fetch_todoist(token):
-    """Liefert (tasks, done_today). tasks: Liste von Dicts mit
-    area, content, project, due (date|None), prio_hoch (bool)."""
+    """Liefert (tasks, done_today) über die aktuelle Todoist Unified API v1.
+    (Die alte REST-API v2 wurde Anfang 2026 abgeschaltet.)"""
     import requests
     H = {"Authorization": f"Bearer {token}"}
-    projects = requests.get("https://api.todoist.com/rest/v2/projects", headers=H, timeout=30).json()
-    raw_tasks = requests.get("https://api.todoist.com/rest/v2/tasks", headers=H, timeout=30).json()
+    r = requests.post(
+        "https://api.todoist.com/api/v1/sync", headers=H, timeout=30,
+        data={"sync_token": "*", "resource_types": '["items","projects"]'})
+    if r.status_code == 401:
+        sys.exit("FEHLER: TODOIST_TOKEN wird abgelehnt (401). Bitte in Todoist unter "
+                 "Einstellungen → Integrationen → Entwickler den API-Token neu kopieren "
+                 "und das Secret TODOIST_TOKEN aktualisieren.")
+    if r.status_code != 200:
+        sys.exit(f"FEHLER: Todoist-API antwortet mit HTTP {r.status_code}: {r.text[:300]}")
+    data = r.json()
+    projects = [p for p in data.get("projects", []) if not p.get("is_deleted")]
+    raw_tasks = [t for t in data.get("items", [])
+                 if not t.get("checked") and not t.get("is_deleted")]
+    print(f"Todoist: {len(projects)} Projekte, {len(raw_tasks)} offene Aufgaben geladen")
 
+    tasks = map_todoist(projects, raw_tasks)
+
+    done_today = 0
+    try:
+        since = datetime.now(TZ).strftime("%Y-%m-%dT00:00:00")
+        until = datetime.now(TZ).strftime("%Y-%m-%dT23:59:59")
+        r2 = requests.get("https://api.todoist.com/api/v1/tasks/completed/by_completion_date",
+                          headers=H, params={"since": since, "until": until, "limit": 200},
+                          timeout=30)
+        if r2.status_code == 200:
+            j = r2.json()
+            done_today = len(j.get("items", j.get("results", [])))
+        else:
+            print(f"Hinweis: Erledigt-Zähler nicht verfügbar (HTTP {r2.status_code}) – zeige 0.")
+    except Exception as e:
+        print(f"Hinweis: Erledigt-Zähler nicht verfügbar ({e}) – zeige 0.")
+    return tasks, done_today
+
+
+def map_todoist(projects, raw_tasks):
+    """Ordnet Todoist-Aufgaben den drei Lebensbereichen zu."""
     by_id = {p["id"]: p for p in projects}
 
     def top_ancestor(p):
@@ -67,16 +100,12 @@ def fetch_todoist(token):
             "due": due,
             "prio_hoch": t.get("priority", 1) >= 4,  # Todoist: 4 == P1
         })
-
-    done_today = 0
-    try:
-        since = datetime.now(TZ).strftime("%Y-%m-%dT00:00:00")
-        r = requests.get("https://api.todoist.com/sync/v9/completed/get_all",
-                         headers=H, params={"since": since, "limit": 200}, timeout=30)
-        done_today = len(r.json().get("items", []))
-    except Exception:
-        pass
-    return tasks, done_today
+    if not tasks and raw_tasks:
+        names = ", ".join(sorted({top_ancestor(by_id[t["project_id"]])["name"]
+                                  for t in raw_tasks if t.get("project_id") in by_id}))
+        print(f"WARNUNG: Keine Aufgabe konnte Privat/Arbeit/Studium zugeordnet werden. "
+              f"Gefundene Hauptprojekte: {names}. Bitte Projektnamen prüfen.")
+    return tasks
 
 
 # ------------------------------------------------------------------- iCal ---
@@ -84,7 +113,17 @@ def fetch_events(ics_url, start, end):
     """Termine [start, end) als Liste von Dicts: date, time ('' bei ganztägig),
     end_time, title. Nutzt icalendar + recurring_ical_events (löst Serien auf)."""
     import requests, icalendar, recurring_ical_events
-    cal = icalendar.Calendar.from_ical(requests.get(ics_url, timeout=30).content)
+    resp = requests.get(ics_url, timeout=30)
+    if resp.status_code != 200:
+        sys.exit(f"FEHLER: Kalender-Adresse (ICS_URL) antwortet mit HTTP {resp.status_code}. "
+                 "Bitte in Google Kalender → Einstellungen → dein Kalender → 'Kalender integrieren' "
+                 "die 'Privatadresse im iCal-Format' kopieren (endet auf basic.ics).")
+    try:
+        cal = icalendar.Calendar.from_ical(resp.content)
+    except Exception:
+        sys.exit("FEHLER: Die ICS_URL liefert keinen gültigen Kalender. Bitte prüfen, dass die "
+                 "'Privatadresse im iCal-Format' hinterlegt ist (nicht die öffentliche Adresse "
+                 "oder der Einbettungscode).")
     out = []
     for ev in recurring_ical_events.of(cal).between(start, end):
         dtstart = ev.get("DTSTART").dt
@@ -518,6 +557,7 @@ def main():
             events = fetch_events(ics, start, end)
         else:
             events = []
+        print(f"Kalender: {len(events)} Termine geladen")
 
     plain = build_html(tasks, done_today, events, refresh_token)
     encrypted = encrypt_page(plain, password)
