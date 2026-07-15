@@ -30,6 +30,12 @@ WD_LONG = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag",
 MONTHS = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli",
           "August", "September", "Oktober", "November", "Dezember"]
 CARDSHOWS_URL = "https://gradedmoments.de/cardshows/"
+RELEASES_URL = "https://www.collectosk.com/de/new-release-calendar/"
+# Bekannte Hersteller (Reihenfolge = Erkennungspriorität; 'UPPER DECK' vor 'LEAF' etc. unkritisch)
+MAKERS = [("UPPER DECK", "Upper Deck"), ("TOPPS", "Topps"), ("PANINI", "Panini"),
+          ("LEAF", "Leaf"), ("ULTIMATE DROPZ", "Ultimate Dropz"), ("FUTERA", "Futera"),
+          ("BOWMAN", "Bowman"), ("FANATICS", "Fanatics"), ("CARDSMITHS", "Cardsmiths"),
+          ("PARKSIDE", "Parkside"), ("SAGE", "Sage")]
 MONTH_NUM = {"januar": 1, "februar": 2, "märz": 3, "maerz": 3, "april": 4, "mai": 5,
              "juni": 6, "juli": 7, "august": 8, "september": 9, "oktober": 10,
              "november": 11, "dezember": 12}
@@ -257,6 +263,91 @@ def fetch_cardshows(today):
         return [], "Quelle derzeit nicht erreichbar."
 
 
+# --------------------------------------------------------------- Releases ---
+_REL_DATE = re.compile(r"\b(\d{2})\.(\d{2})\.(\d{4})\b")
+
+
+def detect_maker(name):
+    up = name.upper()
+    for key, label in MAKERS:
+        if key in up:
+            return label
+    return "Sonstige"
+
+
+def parse_releases(html_text):
+    """Parst die Release-Tabelle von collectosk.com.
+    Zeilen: Datum (DD.MM.YYYY oder leer/TBD) | Kollektionsname (ggf. verlinkt)
+    | Checklisten-Link | Kategorie."""
+    if isinstance(html_text, bytes):
+        html_text = html_text.decode("utf-8", errors="replace")
+    releases = []
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", html_text, re.S | re.I):
+        cells = re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, re.S | re.I)
+        if len(cells) < 2:
+            continue
+        texts = [_strip_tags(c) for c in cells]
+        # Datum aus der ersten Zelle
+        m = _REL_DATE.search(texts[0])
+        rel_date = None
+        if m:
+            try:
+                rel_date = date(int(m.group(3)), int(m.group(2)), int(m.group(1))).isoformat()
+            except Exception:
+                rel_date = None
+        # Namenszelle: die Zelle mit dem längsten Text (überspringt Datum/CL/Kategorie)
+        name_idx = max(range(len(texts)), key=lambda i: len(texts[i]))
+        name = texts[name_idx]
+        if not name or name.lower() in ("datum", "kollektionsname", "kategorie", "cl"):
+            continue
+        if not m and "tbd" not in texts[0].lower() and texts[0].strip():
+            # erste Zelle enthält weder Datum noch TBD/leer -> vermutlich keine Datenzeile
+            if not _REL_DATE.search(_strip_tags(row)):
+                pass  # TBD-Zeilen haben oft eine leere Datumszelle – Zeile trotzdem zulassen
+        url = ""
+        mlink = re.search(r'<a[^>]+href="(https?://(?:www\.)?collectosk\.com/[^"#]+)"[^>]*>', cells[name_idx], re.I)
+        if mlink:
+            url = mlink.group(1)
+        checklist = ""
+        mcl = re.search(r'<a[^>]+href="(https?://[^"]*#checklist[^"]*)"', row, re.I)
+        if mcl:
+            checklist = mcl.group(1)
+        category = texts[-1].strip() if len(texts) >= 2 else ""
+        if category == name:
+            category = ""
+        releases.append({
+            "date": rel_date, "name": name, "url": url, "checklist": checklist,
+            "category": category, "maker": detect_maker(name),
+        })
+    return releases
+
+
+def fetch_releases(today):
+    """Lädt den Release-Kalender und pflegt eine dauerhafte Historie im Cache:
+    Releases, die von der Seite verschwinden (älter als ~1 Woche), bleiben erhalten."""
+    import requests
+    history = load_cache("releases_history") or {}
+    try:
+        r = requests.get(RELEASES_URL, timeout=30, headers=UA)
+        r.raise_for_status()
+        current = parse_releases(r.text)
+        if not current:
+            raise ValueError("keine Releases in der Seite gefunden")
+        for rel in current:
+            key = rel["name"].lower()
+            history[key] = rel  # neue Daten gewinnen (z. B. TBD bekommt später ein Datum)
+        save_cache("releases_history", history)
+        releases = list(history.values())
+        print(f"Releases: {len(current)} aktuell auf der Seite, {len(releases)} insgesamt in der Historie")
+        return releases, None
+    except Exception as e:
+        if history:
+            print(f"Hinweis: Release-Kalender nicht erreichbar ({e}) – nutze Historie.")
+            return list(history.values()), "Quelle gerade nicht erreichbar – Stand vom letzten erfolgreichen Abruf."
+        print(f"Hinweis: Release-Kalender nicht verfügbar ({e}).")
+        return [], "Quelle derzeit nicht erreichbar."
+
+
 # ------------------------------------------------------------------- News ---
 def parse_rss(xml_bytes, limit=8):
     import xml.etree.ElementTree as ET
@@ -359,7 +450,20 @@ def testdata(today):
         {"name": "LigaInsider", "home": "https://www.ligainsider.de", "note": "Quelle derzeit nicht erreichbar",
          "items": []},
     ]
-    return tasks, 2, events, shows, news
+    releases = [
+        {"date": (today - timedelta(days=4)).isoformat(), "name": "2026 TOPPS Finest Baseball Cards ⚾",
+         "url": "https://www.collectosk.com/de/", "checklist": "https://www.collectosk.com/de/#checklist",
+         "category": "Baseball", "maker": "Topps"},
+        {"date": (today + timedelta(days=2)).isoformat(), "name": "2025 TOPPS Chrome Black NFL Football Cards 🏈",
+         "url": "https://www.collectosk.com/de/", "checklist": "", "category": "Am. Football", "maker": "Topps"},
+        {"date": (today + timedelta(days=6)).isoformat(), "name": "2025-26 PANINI's Football EFL Soccer Cards ⚽",
+         "url": "", "checklist": "", "category": "Soccer / Fußball", "maker": "Panini"},
+        {"date": (today + timedelta(days=40)).isoformat(), "name": "2026 UPPER DECK Goodwin Champions Cards 🏟️",
+         "url": "", "checklist": "", "category": "Sports", "maker": "Upper Deck"},
+        {"date": None, "name": "2026 PANINI Flawless FIFA World Cup 2026 Soccer Cards ⚽",
+         "url": "", "checklist": "", "category": "Soccer / Fußball", "maker": "Panini"},
+    ]
+    return tasks, 2, events, shows, news, releases
 
 
 # ------------------------------------------------------------------ HTML ---
@@ -402,7 +506,9 @@ def fmt_show_date(s):
     return base
 
 
-def build_html(tasks, done_today, events, cardshows, news, refresh_token, shows_note=None):
+def build_html(tasks, done_today, events, cardshows, news, refresh_token,
+               shows_note=None, releases=None, releases_note=None):
+    releases = releases or []
     now = datetime.now(TZ)
     today = now.date()
     monday = today - timedelta(days=today.weekday())
@@ -509,14 +615,18 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token, shows_
     year_html = "".join(year_groups) if year_groups else \
         '<div class="empty">Keine Termine in den nächsten 12 Monaten.</div>'
 
-    # --- Cardshows (gruppiert nach Monat/Jahr)
-    show_parts, cur_group = [], None
-    de_count = 0
+    # --- Cardshows (gruppiert nach Monat/Jahr, Monate per Chip filterbar)
+    show_parts, show_month_chips = [], []
+    cur_group, de_count = None, 0
     for s in cardshows:
         sd = date.fromisoformat(s["start"])
+        mkey = f"{sd.year}-{sd.month:02d}"
         group = f"{MONTHS[sd.month-1]} {sd.year}"
         if group != cur_group:
-            show_parts.append(f'<h3 class="ygroup">{group}</h3>')
+            if cur_group is not None:
+                show_parts.append("</div>")
+            show_parts.append(f'<div class="sgroup" data-month="{mkey}"><h3 class="ygroup">{group}</h3>')
+            show_month_chips.append(f'<button class="chip" data-v="{mkey}">{group}</button>')
             cur_group = group
         de_cls = " de" if s.get("is_de") else ""
         if s.get("is_de"):
@@ -530,9 +640,89 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token, shows_
       <div class="show-name">{name}{badge}</div>
       <div class="show-loc">{esc(s["location"])}</div>
     </div>''')
+    if cur_group is not None:
+        show_parts.append("</div>")
     shows_note = shows_note or ""
     shows_stat = f"{len(cardshows)} kommende Shows, davon {de_count} in Deutschland" if cardshows else ""
+    shows_filter = (f'<div class="filterrow"><span class="flabel">Monat:</span>'
+                    f'<button class="chip active" data-v="">Alle</button>{"".join(show_month_chips)}</div>'
+                    if show_month_chips else "")
     shows_html = "".join(show_parts) if show_parts else '<div class="empty">Keine kommenden Shows gefunden.</div>'
+
+    # --- Releases (collectosk.com): kommend prominent, vergangene einklappbar, Filter-Chips
+    today_iso = today.isoformat()
+    rel_dated = [r for r in releases if r.get("date")]
+    rel_upcoming = sorted([r for r in rel_dated if r["date"] >= today_iso], key=lambda r: r["date"])
+    rel_past = sorted([r for r in rel_dated if r["date"] < today_iso], key=lambda r: r["date"], reverse=True)
+    rel_tbd = sorted([r for r in releases if not r.get("date")], key=lambda r: r["name"].lower())
+    rel_makers = sorted({r["maker"] for r in releases})
+    rel_cats = sorted({r["category"] for r in releases if r.get("category")})
+
+    def rel_row(r, past=False):
+        if r.get("date"):
+            d = date.fromisoformat(r["date"])
+            dtxt = f"{WD[d.weekday()]}, {d.day:02d}.{d.month:02d}.{d.year}"
+            mkey = f"{d.year}-{d.month:02d}"
+        else:
+            dtxt, mkey = "TBD", "tbd"
+        name = esc(r["name"])
+        if r.get("url"):
+            name = f'<a href="{esc(r["url"])}" target="_blank" rel="noopener">{name}</a>'
+        cl = (f' <a class="cl" href="{esc(r["checklist"])}" target="_blank" rel="noopener">✓ Checkliste</a>'
+              if r.get("checklist") else "")
+        cat = f'<span class="rel-cat">{esc(r["category"])}</span>' if r.get("category") else ""
+        return (f'<div class="rel{" past" if past else ""}" data-maker="{esc(r["maker"])}" '
+                f'data-cat="{esc(r.get("category") or "")}" data-month="{mkey}">'
+                f'<span class="rel-date">{dtxt}</span>'
+                f'<span class="mk" title="Nach {esc(r["maker"])} filtern">{esc(r["maker"])}</span>'
+                f'<span class="rel-name">{name}</span>{cat}{cl}</div>')
+
+    rel_month_chips, rel_parts, cur = [], [], None
+    for r in rel_upcoming:
+        d = date.fromisoformat(r["date"])
+        mkey = f"{d.year}-{d.month:02d}"
+        group = f"{MONTHS[d.month-1]} {d.year}"
+        if group != cur:
+            if cur is not None:
+                rel_parts.append("</div>")
+            rel_parts.append(f'<div class="mgroup" data-month="{mkey}"><h3 class="ygroup">{group}</h3>')
+            rel_month_chips.append(f'<button class="chip" data-dim="month" data-v="{mkey}">{group}</button>')
+            cur = group
+        rel_parts.append(rel_row(r))
+    if cur is not None:
+        rel_parts.append("</div>")
+    if rel_tbd:
+        rel_parts.append('<div class="mgroup" data-month="tbd"><h3 class="ygroup">Ohne Termin (TBD)</h3>')
+        rel_parts.extend(rel_row(r) for r in rel_tbd)
+        rel_parts.append("</div>")
+        rel_month_chips.append('<button class="chip" data-dim="month" data-v="tbd">TBD</button>')
+    past_parts, cur = [], None
+    for r in rel_past:
+        d = date.fromisoformat(r["date"])
+        mkey = f"{d.year}-{d.month:02d}"
+        group = f"{MONTHS[d.month-1]} {d.year}"
+        if group != cur:
+            if cur is not None:
+                past_parts.append("</div>")
+            past_parts.append(f'<div class="mgroup" data-month="{mkey}"><h3 class="ygroup">{group}</h3>')
+            cur = group
+        past_parts.append(rel_row(r, past=True))
+    if cur is not None:
+        past_parts.append("</div>")
+    rel_past_html = (f'<details class="pastbox"><summary>Vergangene Releases anzeigen ({len(rel_past)})</summary>'
+                     f'{"".join(past_parts)}</details>') if rel_past else ""
+    maker_chips = "".join(f'<button class="chip" data-dim="maker" data-v="{esc(m)}">{esc(m)}</button>'
+                          for m in rel_makers)
+    cat_chips = "".join(f'<button class="chip" data-dim="cat" data-v="{esc(c)}">{esc(c)}</button>'
+                        for c in rel_cats)
+    rel_filters_html = f'''
+    <div class="filterrow"><span class="flabel">Hersteller:</span><button class="chip active" data-dim="maker" data-v="">Alle</button>{maker_chips}</div>
+    <div class="filterrow"><span class="flabel">Kategorie:</span><button class="chip active" data-dim="cat" data-v="">Alle</button>{cat_chips}</div>
+    <div class="filterrow"><span class="flabel">Monat:</span><button class="chip active" data-dim="month" data-v="">Alle</button>{"".join(rel_month_chips)}</div>'''
+    rel_stat = (f"{len(rel_upcoming)} kommende · {len(rel_tbd)} ohne Termin · {len(rel_past)} vergangene"
+                if releases else "")
+    releases_note = releases_note or ""
+    rel_body = "".join(rel_parts) if rel_parts else '<div class="empty">Keine kommenden Releases gefunden.</div>'
 
     # --- News
     news_panels = []
@@ -678,6 +868,26 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token, shows_
   .debadge {{ font-size: 11px; font-weight: 600; color: var(--good-text); border: 1px solid var(--privat); border-radius: 99px; padding: 1px 8px; margin-left: 8px; white-space: nowrap; }}
   .show-loc {{ font-size: 13px; color: var(--text-secondary); }}
   .srcline {{ font-size: 12px; color: var(--muted); margin-bottom: 16px; }}
+  .filterrow {{ display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }}
+  .flabel {{ font-size: 12px; color: var(--muted); min-width: 80px; }}
+  .chip {{ padding: 4px 12px; font-size: 12px; font-weight: 600; border-radius: 99px;
+          border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary); cursor: pointer; }}
+  .chip.active {{ background: var(--arbeit); color: #fff; border-color: var(--arbeit); }}
+  .rel {{ display: flex; gap: 10px; align-items: baseline; padding: 8px 12px; flex-wrap: wrap;
+         background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 6px; font-size: 14px; }}
+  .rel.past {{ opacity: .6; }}
+  .rel-date {{ color: var(--text-secondary); font-variant-numeric: tabular-nums; min-width: 118px; font-size: 13px; white-space: nowrap; }}
+  .mk {{ font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 99px;
+        border: 1px solid var(--arbeit); color: var(--arbeit); cursor: pointer; white-space: nowrap; }}
+  .rel-name {{ flex: 1; min-width: 220px; }}
+  .rel-name a {{ text-decoration: none; }}
+  .rel-name a:hover {{ text-decoration: underline; }}
+  .rel-cat {{ font-size: 12px; color: var(--muted); white-space: nowrap; }}
+  .cl {{ font-size: 12px; color: var(--good-text); text-decoration: none; border: 1px solid var(--privat);
+        border-radius: 99px; padding: 1px 8px; white-space: nowrap; }}
+  details.pastbox {{ margin-top: 20px; }}
+  details.pastbox summary {{ cursor: pointer; font-weight: 650; font-size: 14px; color: var(--text-secondary);
+                             padding: 8px 0; }}
   ul.newslist {{ list-style: none; }}
   ul.newslist li {{ padding: 7px 0; border-bottom: 1px solid var(--hairline); font-size: 14px; line-height: 1.35; }}
   ul.newslist li:last-child {{ border-bottom: none; }}
@@ -704,6 +914,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token, shows_
     <button data-view="view-month">Monat</button>
     <button data-view="view-year">Jahr</button>
     <button data-view="view-shows">Cardshows</button>
+    <button data-view="view-releases">Releases</button>
     <button data-view="view-news">News</button>
   </nav>
 
@@ -749,7 +960,16 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token, shows_
   <div id="view-shows" class="view">
     <h2 class="vtitle">Cardshows &amp; Trade Events</h2>
     <div class="srcline">Quelle: <a href="https://gradedmoments.de/cardshows/" target="_blank" rel="noopener">gradedmoments.de</a> · Stand {stand} Uhr{" · " + shows_stat if shows_stat else ""}{" · " + esc(shows_note) if shows_note else ""} · <span style="color:var(--good-text)">🇩🇪 = Show in Deutschland</span></div>
+    {shows_filter}
     {shows_html}
+  </div>
+
+  <div id="view-releases" class="view">
+    <h2 class="vtitle">Release-Kalender · Trading Cards</h2>
+    <div class="srcline">Quelle: <a href="{RELEASES_URL}" target="_blank" rel="noopener">collectosk.com</a> · Stand {stand} Uhr{" · " + rel_stat if rel_stat else ""}{" · " + esc(releases_note) if releases_note else ""} · Tipp: Hersteller-Badge anklicken filtert direkt</div>
+    {rel_filters_html}
+    {rel_body}
+    {rel_past_html}
   </div>
 
   <div id="view-news" class="view">
@@ -784,7 +1004,37 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token, shows_
   }});
   document.getElementById('mnext').addEventListener('click', () => {{
     if (msel.selectedIndex < msel.options.length - 1) {{ msel.selectedIndex++; showMonth(msel.value); }}
-  }});{refresh_js}
+  }});
+  // Cardshows: Monats-Chips
+  document.querySelectorAll('#view-shows .chip').forEach(c => c.addEventListener('click', () => {{
+    document.querySelectorAll('#view-shows .chip').forEach(x => x.classList.toggle('active', x === c));
+    const v = c.dataset.v;
+    document.querySelectorAll('#view-shows .sgroup').forEach(g =>
+      g.style.display = (!v || g.dataset.month === v) ? '' : 'none');
+  }}));
+  // Releases: kombinierbare Filter (Hersteller + Kategorie + Monat)
+  const relF = {{ maker: '', cat: '', month: '' }};
+  function applyRel() {{
+    document.querySelectorAll('#view-releases .rel').forEach(el => {{
+      const ok = (!relF.maker || el.dataset.maker === relF.maker)
+        && (!relF.cat || el.dataset.cat === relF.cat)
+        && (!relF.month || el.dataset.month === relF.month);
+      el.style.display = ok ? '' : 'none';
+    }});
+    document.querySelectorAll('#view-releases .mgroup').forEach(g => {{
+      const any = Array.from(g.querySelectorAll('.rel')).some(e => e.style.display !== 'none');
+      g.style.display = any ? '' : 'none';
+    }});
+    document.querySelectorAll('#view-releases .chip').forEach(c =>
+      c.classList.toggle('active', relF[c.dataset.dim] === c.dataset.v));
+  }}
+  document.querySelectorAll('#view-releases .chip').forEach(c => c.addEventListener('click', () => {{
+    relF[c.dataset.dim] = c.dataset.v; applyRel();
+  }}));
+  document.querySelectorAll('#view-releases .mk').forEach(b => b.addEventListener('click', () => {{
+    const v = b.textContent.trim();
+    relF.maker = (relF.maker === v) ? '' : v; applyRel();
+  }}));{refresh_js}
 </script>
 </body>
 </html>'''
@@ -890,9 +1140,9 @@ def main():
     now = datetime.now(TZ)
     today = now.date()
 
-    shows_note = None
+    shows_note = releases_note = None
     if os.environ.get("DASH_TEST") == "1":
-        tasks, done_today, events, cardshows, news = testdata(today)
+        tasks, done_today, events, cardshows, news, releases = testdata(today)
     else:
         token = (os.environ.get("TODOIST_TOKEN") or "").strip()
         ics = (os.environ.get("ICS_URL") or "").strip()
@@ -907,14 +1157,17 @@ def main():
         else:
             events = []
         cardshows, shows_note = fetch_cardshows(today)
+        releases, releases_note = fetch_releases(today)
         news = fetch_news()
 
-    plain = build_html(tasks, done_today, events, cardshows, news, refresh_token, shows_note)
+    plain = build_html(tasks, done_today, events, cardshows, news, refresh_token,
+                       shows_note, releases, releases_note)
     encrypted = encrypt_page(plain, password)
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(encrypted)
     print(f"OK: index.html geschrieben ({len(encrypted)} Zeichen), {len(tasks)} Aufgaben, "
-          f"{len(events)} Termine, {len(cardshows)} Cardshows, Stand {now.strftime('%H:%M')} Uhr")
+          f"{len(events)} Termine, {len(cardshows)} Cardshows, {len(releases)} Releases, "
+          f"Stand {now.strftime('%H:%M')} Uhr")
 
 
 if __name__ == "__main__":
