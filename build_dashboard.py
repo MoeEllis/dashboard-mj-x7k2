@@ -40,6 +40,8 @@ MONTH_NUM = {"januar": 1, "februar": 2, "märz": 3, "maerz": 3, "april": 4, "mai
              "juni": 6, "juli": 7, "august": 8, "september": 9, "oktober": 10,
              "november": 11, "dezember": 12}
 UA = {"User-Agent": "Mozilla/5.0 (compatible; PersonalDashboard/1.0)"}
+# Trello legt für jeden neuen Account automatisch ein Demo-Board an – das blenden wir aus.
+TRELLO_SKIP_BOARDS = {"welcome board", "willkommens-board", "welcome-board"}
 
 esc = html.escape
 
@@ -348,6 +350,63 @@ def fetch_releases(today):
         return [], "Quelle derzeit nicht erreichbar."
 
 
+# ----------------------------------------------------------------- Trello ---
+def _trello_due(due_iso):
+    """Wandelt Trellos UTC-Fälligkeitsdatum in lokales Datum/Uhrzeit um."""
+    if not due_iso:
+        return None, None
+    try:
+        dt = datetime.fromisoformat(due_iso.replace("Z", "+00:00")).astimezone(TZ)
+        return dt.date().isoformat(), dt.strftime("%H:%M")
+    except Exception:
+        return None, None
+
+
+def fetch_trello(key, token, today):
+    """Liefert offene Trello-Karten je Board/Liste (nur Listen mit Karten,
+    Trellos automatisches Willkommens-Board wird ausgeblendet)."""
+    if not key or not token:
+        return [], None
+    import requests
+    auth = {"key": key, "token": token}
+    try:
+        r = requests.get("https://api.trello.com/1/members/me/boards", params={
+            **auth, "fields": "name,url,closed", "filter": "open"}, timeout=20)
+        r.raise_for_status()
+        boards = []
+        for b in r.json():
+            if b.get("closed") or b.get("name", "").strip().lower() in TRELLO_SKIP_BOARDS:
+                continue
+            lr = requests.get(f"https://api.trello.com/1/boards/{b['id']}/lists", params={
+                **auth, "cards": "open", "card_fields": "name,due,dueComplete,shortUrl",
+                "fields": "name"}, timeout=20)
+            lr.raise_for_status()
+            lists = []
+            for l in lr.json():
+                cards = []
+                for c in l.get("cards") or []:
+                    due_date, due_time = _trello_due(c.get("due"))
+                    overdue = bool(due_date) and not c.get("dueComplete") and due_date < today.isoformat()
+                    cards.append({"name": c.get("name", ""), "due_date": due_date,
+                                  "due_time": due_time, "overdue": overdue,
+                                  "url": c.get("shortUrl", "")})
+                if cards:
+                    lists.append({"name": l.get("name", ""), "cards": cards})
+            if lists:
+                boards.append({"name": b.get("name", ""), "url": b.get("url", ""), "lists": lists})
+        save_cache("trello", boards)
+        n = sum(len(l["cards"]) for b in boards for l in b["lists"])
+        print(f"Trello: {len(boards)} Board(s), {n} offene Karten geladen")
+        return boards, None
+    except Exception as e:
+        cached = load_cache("trello")
+        if cached is not None:
+            print(f"Hinweis: Trello nicht erreichbar ({e}) – nutze letzten Stand.")
+            return cached, "Quelle gerade nicht erreichbar – Stand vom letzten erfolgreichen Abruf."
+        print(f"Hinweis: Trello nicht erreichbar ({e}).")
+        return [], "Trello nicht erreichbar – TRELLO_KEY/TRELLO_TOKEN prüfen."
+
+
 # ------------------------------------------------------------------- News ---
 def parse_rss(xml_bytes, limit=8):
     import xml.etree.ElementTree as ET
@@ -463,7 +522,26 @@ def testdata(today):
         {"date": None, "name": "2026 PANINI Flawless FIFA World Cup 2026 Soccer Cards ⚽",
          "url": "", "checklist": "", "category": "Soccer / Fußball", "maker": "Panini"},
     ]
-    return tasks, 2, events, shows, news, releases
+    trello = [
+        {"name": "WMF", "url": "https://trello.com/b/Lp3CQPEO/wmf", "lists": [
+            {"name": "To Do", "cards": [
+                {"name": "Pans Neuheiten – PIM pflegen", "due_date": today.isoformat(),
+                 "due_time": None, "overdue": False, "url": "https://trello.com/c/example1"},
+                {"name": "WICHTIG: Checkliste PFOA Vorgehen (BPA)",
+                 "due_date": (today - timedelta(days=2)).isoformat(), "due_time": None,
+                 "overdue": True, "url": "https://trello.com/c/example2"},
+                {"name": "Vorbereitung Performance Meeting", "due_date": None,
+                 "due_time": None, "overdue": False, "url": "https://trello.com/c/example3"},
+            ]},
+            {"name": "Ziele 2026", "cards": [
+                {"name": "20% Pans 2.0 Strategy", "due_date": None, "due_time": None,
+                 "overdue": False, "url": "https://trello.com/c/example4"},
+                {"name": "25% Revenue – Business Goals", "due_date": None, "due_time": None,
+                 "overdue": False, "url": "https://trello.com/c/example5"},
+            ]},
+        ]},
+    ]
+    return tasks, 2, events, shows, news, releases, trello
 
 
 # ------------------------------------------------------------------ HTML ---
@@ -507,8 +585,10 @@ def fmt_show_date(s):
 
 
 def build_html(tasks, done_today, events, cardshows, news, refresh_token,
-               shows_note=None, releases=None, releases_note=None):
+               shows_note=None, releases=None, releases_note=None,
+               trello=None, trello_note=None):
     releases = releases or []
+    trello = trello or []
     now = datetime.now(TZ)
     today = now.date()
     monday = today - timedelta(days=today.weekday())
@@ -547,6 +627,43 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
       <div class="area-head"><h2><span class="dot"></span>{area}</h2><span class="count">{len(atasks)} offen</span></div>
       <ul class="tasks">{body}</ul>
     </div>''')
+
+    # --- Trello (Themen = Boards, je Liste eine Karten-Gruppe)
+    trello_total = sum(len(l["cards"]) for b in trello for l in b["lists"])
+    board_blocks = []
+    for b in trello:
+        board_total = sum(len(l["cards"]) for l in b["lists"])
+        list_blocks = []
+        for l in b["lists"]:
+            items = []
+            for c in l["cards"]:
+                meta = due_label(c["due_date"]) if c.get("due_date") else None
+                if meta and c.get("due_time"):
+                    meta = f"{meta} · {c['due_time']}"
+                meta_html = f'<span class="meta">{esc(meta)}</span>' if meta else ""
+                overdue = '<span class="prio hoch">überfällig</span>' if c.get("overdue") else ""
+                name = esc(c["name"])
+                if c.get("url"):
+                    name = f'<a href="{esc(c["url"])}" target="_blank" rel="noopener">{name}</a>'
+                items.append(f'<li><span class="box"></span><span class="txt">{name}{meta_html}</span>{overdue}</li>')
+            list_blocks.append(f'''
+        <div class="tlist">
+          <div class="tlist-head"><h3>{esc(l["name"])}</h3><span class="count">{len(l["cards"])} offen</span></div>
+          <ul class="tasks">{"".join(items)}</ul>
+        </div>''')
+        board_blocks.append(f'''
+    <div class="tboard">
+      <div class="tboard-head"><h2><a href="{esc(b["url"])}" target="_blank" rel="noopener">🗂️ {esc(b["name"])}</a></h2><span class="count">{board_total} offen</span></div>
+      <div class="tlists">{"".join(list_blocks)}</div>
+    </div>''')
+    if board_blocks:
+        trello_html = "".join(board_blocks)
+    elif trello_note:
+        trello_html = f'<div class="empty">{esc(trello_note)}</div>'
+    else:
+        trello_html = ('<div class="empty">Noch nicht eingerichtet – Secrets TRELLO_KEY und '
+                        'TRELLO_TOKEN hinterlegen, dann erscheinen hier offene Karten je Board.</div>')
+    trello_sub = f"{len(trello)} Board(s)" if trello else "noch nicht eingerichtet"
 
     open_total = len(tasks)
     per_area = " · ".join(f"{a} {len([t for t in tasks if t['area']==a])}" for a in AREAS)
@@ -773,14 +890,14 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   :root {{
     --surface-1: #fcfcfb; --page: #f9f9f7; --text-primary: #0b0b0b; --text-secondary: #52514e;
     --muted: #898781; --hairline: #e1e0d9; --border: rgba(11,11,11,0.10);
-    --privat: #1baf7a; --arbeit: #2a78d6; --studium: #4a3aa7;
+    --privat: #1baf7a; --arbeit: #2a78d6; --studium: #4a3aa7; --trello: #eda100;
     --good: #0ca30c; --good-text: #006300; --done-ink: #898781;
   }}
   @media (prefers-color-scheme: dark) {{
     :root {{
       --surface-1: #1a1a19; --page: #0d0d0d; --text-primary: #ffffff; --text-secondary: #c3c2b7;
       --muted: #898781; --hairline: #2c2c2a; --border: rgba(255,255,255,0.10);
-      --privat: #199e70; --arbeit: #3987e5; --studium: #9085e9; --good-text: #0ca30c;
+      --privat: #199e70; --arbeit: #3987e5; --studium: #9085e9; --trello: #c98500; --good-text: #0ca30c;
     }}
   }}
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -822,6 +939,21 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   ul.tasks .meta {{ display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }}
   .prio {{ font-size: 11px; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--border); color: var(--text-secondary); white-space: nowrap; margin-top: 2px; }}
   .prio.hoch {{ border-color: #d03b3b; color: #d03b3b; }}
+  .trellowrap {{ margin-bottom: 20px; }}
+  .trello-head {{ display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }}
+  .trello-head h2 {{ font-size: 16px; font-weight: 650; }}
+  .trello-head .count {{ font-size: 12px; color: var(--muted); }}
+  .tboard {{ background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 12px; border-top: 3px solid var(--trello); }}
+  .tboard-head {{ display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 6px; }}
+  .tboard-head h2 {{ font-size: 15px; font-weight: 650; }}
+  .tboard-head h2 a {{ color: inherit; text-decoration: none; }}
+  .tboard-head h2 a:hover {{ text-decoration: underline; }}
+  .tboard-head .count {{ font-size: 12px; color: var(--muted); }}
+  .tlists {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }}
+  .tlist {{ background: var(--page); border: 1px solid var(--hairline); border-radius: 10px; padding: 12px; }}
+  .tlist-head {{ display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }}
+  .tlist-head h3 {{ font-size: 13px; font-weight: 650; color: var(--text-secondary); }}
+  .tlist-head .count {{ font-size: 11px; color: var(--muted); }}
   .row2 {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; margin-bottom: 20px; }}
   .row3 {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-bottom: 20px; }}
   .panel {{ background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }}
@@ -924,8 +1056,13 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     <div class="tile"><div class="label">Heute erledigt</div><div class="value">{done_today}</div><div class="sub">Weiter so</div></div>
     <div class="tile"><div class="label">Nächster Termin</div><div class="value small">{next_ev_title}</div><div class="sub">{next_ev_sub}</div></div>
     <div class="tile"><div class="label">Termine diese Woche</div><div class="value">{week_ev_count}</div><div class="sub">KW {kw}</div></div>
+    <div class="tile"><div class="label">Trello offen</div><div class="value">{trello_total}</div><div class="sub">{trello_sub}</div></div>
   </section>
   <section class="areas">{"".join(area_cards)}
+  </section>
+  <section class="trellowrap">
+    <div class="trello-head"><h2>🗂️ Trello</h2><span class="count">{trello_total} offen</span></div>
+    {trello_html}
   </section>
   <section class="row2">
     <div class="panel"><h2>📅 Termine heute</h2>{today_panel}</div>
@@ -1140,12 +1277,14 @@ def main():
     now = datetime.now(TZ)
     today = now.date()
 
-    shows_note = releases_note = None
+    shows_note = releases_note = trello_note = None
     if os.environ.get("DASH_TEST") == "1":
-        tasks, done_today, events, cardshows, news, releases = testdata(today)
+        tasks, done_today, events, cardshows, news, releases, trello = testdata(today)
     else:
         token = (os.environ.get("TODOIST_TOKEN") or "").strip()
         ics = (os.environ.get("ICS_URL") or "").strip()
+        trello_key = (os.environ.get("TRELLO_KEY") or "").strip()
+        trello_token = (os.environ.get("TRELLO_TOKEN") or "").strip()
         tasks, done_today = fetch_todoist(token) if token else ([], 0)
         if ics:
             y0, m0 = ym_add(today.year, today.month, -1)
@@ -1158,16 +1297,18 @@ def main():
             events = []
         cardshows, shows_note = fetch_cardshows(today)
         releases, releases_note = fetch_releases(today)
+        trello, trello_note = fetch_trello(trello_key, trello_token, today)
         news = fetch_news()
 
     plain = build_html(tasks, done_today, events, cardshows, news, refresh_token,
-                       shows_note, releases, releases_note)
+                       shows_note, releases, releases_note, trello, trello_note)
     encrypted = encrypt_page(plain, password)
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(encrypted)
+    trello_n = sum(len(l["cards"]) for b in trello for l in b["lists"])
     print(f"OK: index.html geschrieben ({len(encrypted)} Zeichen), {len(tasks)} Aufgaben, "
           f"{len(events)} Termine, {len(cardshows)} Cardshows, {len(releases)} Releases, "
-          f"Stand {now.strftime('%H:%M')} Uhr")
+          f"{trello_n} Trello-Karten, Stand {now.strftime('%H:%M')} Uhr")
 
 
 if __name__ == "__main__":
