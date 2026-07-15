@@ -36,6 +36,8 @@ jobs:
           TODOIST_TOKEN: ${{ secrets.TODOIST_TOKEN }}
           DASH_PASSWORD: ${{ secrets.DASH_PASSWORD }}
           REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
+          TRELLO_KEY: ${{ secrets.TRELLO_KEY }}
+          TRELLO_TOKEN: ${{ secrets.TRELLO_TOKEN }}
         run: python build_dashboard.py
 
       - name: Veröffentlichen (nur bei Änderung)
