@@ -4,18 +4,21 @@
 Baut Moritz' persönliches Dashboard und verschlüsselt es zu index.html.
 
 Datenquellen:
-  - Todoist REST API v2 (Aufgaben, Projekte)          [Secret: TODOIST_TOKEN]
+  - Todoist Unified API v1 (Aufgaben, Projekte)        [Secret: TODOIST_TOKEN]
   - Google Kalender, private iCal-Adresse (Termine)    [Secret: ICS_URL]
+  - gradedmoments.de/cardshows (Cardshow-Termine)      [öffentlich]
+  - News: ZDFheute, kicker, LigaInsider                [öffentlich]
 Verschlüsselung:
   - AES-256-GCM, Schlüssel via PBKDF2-SHA256           [Secret: DASH_PASSWORD]
 Optional:
-  - REFRESH_TOKEN: Fine-grained PAT (nur Actions:write) für den
-    "Jetzt aktualisieren"-Knopf. Fehlt er, verlinkt der Knopf auf die Actions-Seite.
+  - REFRESH_TOKEN: Fine-grained PAT (nur Actions:write) für den ⟳-Knopf.
 
 Testmodus: DASH_TEST=1 nutzt eingebaute Beispieldaten statt der APIs.
+Öffentliche Daten (Cardshows/News) werden in cache/ zwischengespeichert,
+damit ein zeitweiliger Ausfall einer Quelle den Bau nicht stoppt.
 """
-import os, sys, json, base64, html
-from datetime import datetime, date, timedelta, timezone
+import os, re, sys, json, base64, html
+from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("Europe/Berlin")
@@ -26,16 +29,37 @@ WD = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
 WD_LONG = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 MONTHS = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli",
           "August", "September", "Oktober", "November", "Dezember"]
+CARDSHOWS_ICS = "https://gradedmoments.de/cardshows/?ical=1"
+UA = {"User-Agent": "Mozilla/5.0 (compatible; PersonalDashboard/1.0)"}
 
 esc = html.escape
 
 
+def ym_add(y, m, k):
+    m2 = m - 1 + k
+    return (y + m2 // 12, m2 % 12 + 1)
+
+
+# ------------------------------------------------------------------ Cache ---
+def load_cache(name):
+    try:
+        with open(f"cache/{name}.json", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def save_cache(name, data):
+    os.makedirs("cache", exist_ok=True)
+    with open(f"cache/{name}.json", "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------- Todoist ---
 def fetch_todoist(token):
-    """Liefert (tasks, done_today) über die aktuelle Todoist Unified API v1.
-    (Die alte REST-API v2 wurde Anfang 2026 abgeschaltet.)"""
+    """Liefert (tasks, done_today) über die aktuelle Todoist Unified API v1."""
     import requests
-    H = {"Authorization": f"Bearer {token}"}
+    H = {"Authorization": f"Bearer {token}", **UA}
     r = requests.post(
         "https://api.todoist.com/api/v1/sync", headers=H, timeout=30,
         data={"sync_token": "*", "resource_types": '["items","projects"]'})
@@ -89,7 +113,7 @@ def map_todoist(projects, raw_tasks):
         top = top_ancestor(proj)
         area = AREA_KEYS.get(top["name"].strip().lower())
         if not area:
-            continue  # Projekte außerhalb von Privat/Arbeit/Studium ignorieren
+            continue
         due = None
         if t.get("due") and t["due"].get("date"):
             due = t["due"]["date"][:10]
@@ -98,7 +122,7 @@ def map_todoist(projects, raw_tasks):
             "content": t.get("content", ""),
             "project": proj["name"] if proj["id"] != top["id"] else None,
             "due": due,
-            "prio_hoch": t.get("priority", 1) >= 4,  # Todoist: 4 == P1
+            "prio_hoch": t.get("priority", 1) >= 4,
         })
     if not tasks and raw_tasks:
         names = ", ".join(sorted({top_ancestor(by_id[t["project_id"]])["name"]
@@ -110,10 +134,9 @@ def map_todoist(projects, raw_tasks):
 
 # ------------------------------------------------------------------- iCal ---
 def fetch_events(ics_url, start, end):
-    """Termine [start, end) als Liste von Dicts: date, time ('' bei ganztägig),
-    end_time, title. Nutzt icalendar + recurring_ical_events (löst Serien auf)."""
+    """Google-Kalender-Termine [start, end) inkl. aufgelöster Serientermine."""
     import requests, icalendar, recurring_ical_events
-    resp = requests.get(ics_url, timeout=30)
+    resp = requests.get(ics_url, timeout=30, headers=UA)
     if resp.status_code != 200:
         sys.exit(f"FEHLER: Kalender-Adresse (ICS_URL) antwortet mit HTTP {resp.status_code}. "
                  "Bitte in Google Kalender → Einstellungen → dein Kalender → 'Kalender integrieren' "
@@ -122,8 +145,7 @@ def fetch_events(ics_url, start, end):
         cal = icalendar.Calendar.from_ical(resp.content)
     except Exception:
         sys.exit("FEHLER: Die ICS_URL liefert keinen gültigen Kalender. Bitte prüfen, dass die "
-                 "'Privatadresse im iCal-Format' hinterlegt ist (nicht die öffentliche Adresse "
-                 "oder der Einbettungscode).")
+                 "'Privatadresse im iCal-Format' hinterlegt ist.")
     out = []
     for ev in recurring_ical_events.of(cal).between(start, end):
         dtstart = ev.get("DTSTART").dt
@@ -133,40 +155,255 @@ def fetch_events(ics_url, start, end):
             local = dtstart.astimezone(TZ)
             d, tm = local.date(), local.strftime("%H:%M")
             te = dtend.astimezone(TZ).strftime("%H:%M") if isinstance(dtend, datetime) else ""
-        else:  # ganztägig
+        else:
             d, tm, te = dtstart, "", ""
         out.append({"date": d.isoformat(), "time": tm, "end_time": te, "title": title})
     out.sort(key=lambda e: (e["date"], e["time"]))
     return out
 
 
+# -------------------------------------------------------------- Cardshows ---
+def _ics_unfold(text):
+    """RFC-5545-Zeilenfaltung auflösen."""
+    lines = []
+    for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if raw[:1] in (" ", "\t") and lines:
+            lines[-1] += raw[1:]
+        else:
+            lines.append(raw)
+    return lines
+
+
+def _ics_unescape(v):
+    return (v.replace("\\n", " ").replace("\\N", " ")
+             .replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\").strip())
+
+
+def _ics_dt(params, value):
+    """Liefert (date, 'HH:MM' | None)."""
+    value = value.strip()
+    if "VALUE=DATE" in params.upper() or (len(value) == 8 and value.isdigit()):
+        return date(int(value[:4]), int(value[4:6]), int(value[6:8])), None
+    v = value.rstrip("Zz")
+    d = date(int(v[:4]), int(v[4:6]), int(v[6:8]))
+    return d, f"{v[9:11]}:{v[11:13]}"
+
+
+def parse_cardshows(ics_bytes, today):
+    """Parst den iCal-Export von gradedmoments.de (ohne Zusatzbibliothek –
+    der Feed enthält nur einfache Einzeltermine)."""
+    if isinstance(ics_bytes, bytes):
+        ics_bytes = ics_bytes.decode("utf-8", errors="replace")
+    shows, ev = [], None
+    for line in _ics_unfold(ics_bytes):
+        u = line.upper()
+        if u.startswith("BEGIN:VEVENT"):
+            ev = {}
+        elif u.startswith("END:VEVENT") and ev is not None:
+            if "DTSTART" in ev:
+                sdate, stime = ev["DTSTART"]
+                edate, etime = ev.get("DTEND", (None, None))
+                if edate and etime is None and edate != sdate:
+                    edate = edate - timedelta(days=1)  # ganztägig: DTEND exklusiv
+                end_ref = edate or sdate
+                if end_ref >= today:
+                    loc = ev.get("LOCATION", "")
+                    low = loc.lower()
+                    shows.append({
+                        "start": sdate.isoformat(),
+                        "end": edate.isoformat() if edate else None,
+                        "time": stime, "end_time": etime,
+                        "name": ev.get("SUMMARY", "Cardshow"),
+                        "location": loc,
+                        "url": ev.get("URL", ""),
+                        "is_de": ("deutschland" in low) or ("germany" in low),
+                    })
+            ev = None
+        elif ev is not None and ":" in line:
+            head, _, value = line.partition(":")
+            prop, _, params = head.partition(";")
+            prop = prop.strip().upper()
+            if prop in ("DTSTART", "DTEND"):
+                try:
+                    ev[prop] = _ics_dt(params, value)
+                except Exception:
+                    pass
+            elif prop in ("SUMMARY", "LOCATION", "URL"):
+                ev[prop] = _ics_unescape(value)
+    shows.sort(key=lambda s: s["start"])
+    return shows[:40]
+
+
+def fetch_cardshows(today):
+    import requests
+    try:
+        r = requests.get(CARDSHOWS_ICS, timeout=30, headers=UA)
+        r.raise_for_status()
+        shows = parse_cardshows(r.content, today)
+        if not shows:
+            raise ValueError("keine kommenden Shows gefunden")
+        save_cache("cardshows", shows)
+        print(f"Cardshows: {len(shows)} kommende Shows geladen")
+        return shows, None
+    except Exception as e:
+        cached = load_cache("cardshows")
+        if cached:
+            print(f"Hinweis: Cardshows-Quelle nicht erreichbar ({e}) – nutze Zwischenspeicher.")
+            return cached, "Quelle gerade nicht erreichbar – Stand vom letzten erfolgreichen Abruf."
+        print(f"Hinweis: Cardshows nicht verfügbar ({e}).")
+        return [], "Quelle derzeit nicht erreichbar."
+
+
+# ------------------------------------------------------------------- News ---
+def parse_rss(xml_bytes, limit=8):
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(xml_bytes)
+    items = []
+    for item in root.iter("item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        if title and link:
+            items.append({"title": title, "url": link})
+        if len(items) >= limit:
+            break
+    return items
+
+
+def parse_ligainsider(html_text, limit=8):
+    pat = re.compile(
+        r'<a[^>]+href="(?:https?://(?:www\.)?ligainsider\.de)?(/[a-z0-9\-]+_\d+/[a-z0-9\-]+-\d+/)"[^>]*>(.*?)</a>',
+        re.IGNORECASE | re.DOTALL)
+    seen, items = set(), []
+    for path, inner in pat.findall(html_text):
+        title = re.sub(r"<[^>]+>", " ", inner)
+        title = re.sub(r"\s+", " ", title).strip()
+        if not title or len(title) < 8 or path in seen:
+            continue
+        seen.add(path)
+        items.append({"title": title, "url": "https://www.ligainsider.de" + path})
+        if len(items) >= limit:
+            break
+    return items
+
+
+def fetch_news():
+    """Liefert Liste von Quellen: {name, home, items, note}."""
+    import requests
+    sources = []
+
+    def try_source(name, home, cache_key, getter):
+        try:
+            items = getter()
+            if not items:
+                raise ValueError("keine Einträge gefunden")
+            save_cache(cache_key, items)
+            print(f"News – {name}: {len(items)} Schlagzeilen")
+            return {"name": name, "home": home, "items": items, "note": None}
+        except Exception as e:
+            cached = load_cache(cache_key)
+            if cached:
+                print(f"Hinweis: {name} nicht erreichbar ({e}) – nutze Zwischenspeicher.")
+                return {"name": name, "home": home, "items": cached,
+                        "note": "Stand vom letzten erfolgreichen Abruf"}
+            print(f"Hinweis: {name} nicht verfügbar ({e}).")
+            return {"name": name, "home": home, "items": [],
+                    "note": "Quelle derzeit nicht erreichbar"}
+
+    sources.append(try_source(
+        "ZDFheute", "https://www.zdfheute.de", "news_zdf",
+        lambda: parse_rss(requests.get("https://www.zdfheute.de/rss/zdf/nachrichten",
+                                       timeout=30, headers=UA).content)))
+    sources.append(try_source(
+        "kicker", "https://www.kicker.de", "news_kicker",
+        lambda: parse_rss(requests.get("https://newsfeed.kicker.de/news/aktuell",
+                                       timeout=30, headers=UA).content)))
+    sources.append(try_source(
+        "LigaInsider", "https://www.ligainsider.de", "news_ligainsider",
+        lambda: parse_ligainsider(requests.get("https://www.ligainsider.de/",
+                                               timeout=30, headers=UA).text)))
+    return sources
+
+
 # ------------------------------------------------------------- Testdaten ---
 def testdata(today):
     tasks = [
         {"area": "Privat", "content": "Einkauf für die Woche planen", "project": None, "due": today.isoformat(), "prio_hoch": False},
-        {"area": "Privat", "content": "Physio-Termin vorbereiten", "project": None, "due": (today + timedelta(days=2)).isoformat(), "prio_hoch": False},
         {"area": "Arbeit", "content": "Wochenplanung: Top-3-Prioritäten", "project": "Projekt Alpha", "due": today.isoformat(), "prio_hoch": True},
-        {"area": "Arbeit", "content": "Projekt-Update an Team", "project": "Projekt Beta", "due": (today + timedelta(days=1)).isoformat(), "prio_hoch": False},
         {"area": "Studium", "content": "Übungsblatt bearbeiten", "project": "Mathe II", "due": (today + timedelta(days=3)).isoformat(), "prio_hoch": True},
-        {"area": "Studium", "content": "Skript nacharbeiten", "project": "Info I", "due": None, "prio_hoch": False},
     ]
     events = [
         {"date": (today + timedelta(days=3)).isoformat(), "time": "08:00", "end_time": "08:20", "title": "Physio ZAR"},
         {"date": (today + timedelta(days=8)).isoformat(), "time": "17:15", "end_time": "17:35", "title": "Physio ZAR"},
+        {"date": (today + timedelta(days=45)).isoformat(), "time": "", "end_time": "", "title": "Urlaub Start"},
+        {"date": (today + timedelta(days=100)).isoformat(), "time": "10:00", "end_time": "12:00", "title": "Zahnarzt"},
     ]
-    return tasks, 2, events
+    shows = [
+        {"start": (today + timedelta(days=2)).isoformat(), "end": (today + timedelta(days=5)).isoformat(),
+         "time": None, "end_time": None, "name": "Fanatics Fan Fest NYC",
+         "location": "Javits Center, New York, United States", "url": "https://gradedmoments.de/", "is_de": False},
+        {"start": (today + timedelta(days=17)).isoformat(), "end": None, "time": "18:00", "end_time": "22:00",
+         "name": "Tradenight Der Kiosk 030", "location": "Berlin, Deutschland",
+         "url": "https://gradedmoments.de/", "is_de": True},
+        {"start": (today + timedelta(days=53)).isoformat(), "end": (today + timedelta(days=54)).isoformat(),
+         "time": "10:00", "end_time": "18:00", "name": "Heide Cardshow",
+         "location": "Lüneburg, Deutschland", "url": "https://gradedmoments.de/", "is_de": True},
+    ]
+    news = [
+        {"name": "ZDFheute", "home": "https://www.zdfheute.de", "note": None,
+         "items": [{"title": f"Beispiel-Schlagzeile {i}", "url": "https://www.zdfheute.de"} for i in range(1, 6)]},
+        {"name": "kicker", "home": "https://www.kicker.de", "note": None,
+         "items": [{"title": f"Fußball-Meldung {i}", "url": "https://www.kicker.de"} for i in range(1, 6)]},
+        {"name": "LigaInsider", "home": "https://www.ligainsider.de", "note": "Quelle derzeit nicht erreichbar",
+         "items": []},
+    ]
+    return tasks, 2, events, shows, news
 
 
 # ------------------------------------------------------------------ HTML ---
-def build_html(tasks, done_today, events, refresh_token):
+def month_grid_html(y, m, ev_by_date, today):
+    first = date(y, m, 1)
+    nxt = (first.replace(day=28) + timedelta(days=7)).replace(day=1)
+    d = first - timedelta(days=first.weekday())
+    end = nxt + timedelta(days=(7 - nxt.weekday()) % 7)
+    cells = []
+    while d < end:
+        iso = d.isoformat()
+        cls = "mday"
+        if d.month != m: cls += " out"
+        if d == today: cls += " today"
+        num = f"{d.day:02d}.{d.month:02d}." if d.month != m else str(d.day)
+        chips = ""
+        for e in ev_by_date.get(iso, []):
+            past = " past" if iso < today.isoformat() else ""
+            label = (e["time"] + " " if e["time"] else "") + e["title"]
+            chips += f'<div class="chip{past}">{esc(label)}</div>'
+        cells.append(f'<div class="{cls}"><div class="num">{num}</div>{chips}</div>')
+        d += timedelta(days=1)
+    head = "".join(f"<div>{w}</div>" for w in WD)
+    return f'<div class="month-head">{head}</div><div class="month-grid">{"".join(cells)}</div>'
+
+
+def fmt_show_date(s):
+    ds = date.fromisoformat(s["start"])
+    de_ = date.fromisoformat(s["end"]) if s.get("end") else None
+    if de_ and de_ != ds:
+        if ds.month == de_.month and ds.year == de_.year:
+            return f"{ds.day:02d}.–{de_.day:02d}.{de_.month:02d}.{de_.year}"
+        return f"{ds.day:02d}.{ds.month:02d}.–{de_.day:02d}.{de_.month:02d}.{de_.year}"
+    base = f"{WD[ds.weekday()]}, {ds.day:02d}.{ds.month:02d}.{ds.year}"
+    if s.get("time"):
+        base += f" · {s['time']}"
+        if s.get("end_time"):
+            base += f"–{s['end_time']}"
+        base += " Uhr"
+    return base
+
+
+def build_html(tasks, done_today, events, cardshows, news, refresh_token):
     now = datetime.now(TZ)
     today = now.date()
     monday = today - timedelta(days=today.weekday())
     week_days = [monday + timedelta(days=i) for i in range(7)]
-    month_first = today.replace(day=1)
-    next_month = (month_first.replace(day=28) + timedelta(days=7)).replace(day=1)
-    grid_start = month_first - timedelta(days=month_first.weekday())
-    grid_end = next_month + timedelta(days=(7 - next_month.weekday()) % 7)
 
     ev_by_date = {}
     for e in events:
@@ -178,9 +415,6 @@ def build_html(tasks, done_today, events, refresh_token):
 
     area_var = {"Privat": "privat", "Arbeit": "arbeit", "Studium": "studium"}
 
-    def fmt_date_line():
-        return f"{WD_LONG[today.weekday()]}, {today.day}. {MONTHS[today.month-1]} {today.year} · Stand {now.strftime('%H:%M')} Uhr"
-
     def due_label(iso):
         d = date.fromisoformat(iso)
         if d == today: return "heute"
@@ -188,17 +422,16 @@ def build_html(tasks, done_today, events, refresh_token):
         if d < today: return f"überfällig ({d.day}.{d.month:02d}.)"
         return f"bis {WD[d.weekday()]}, {d.day:02d}.{d.month:02d}."
 
-    # --- Heute: Bereichs-Karten
+    # --- Heute
     area_cards = []
     for area in AREAS:
         atasks = [t for t in tasks if t["area"] == area]
         items = []
         for t in atasks:
             meta = " · ".join(x for x in [t["project"], due_label(t["due"]) if t["due"] else None] if x)
-            prio = '<span class="prio hoch">hoch</span>' if t["prio_hoch"] else ""
             meta_html = f'<span class="meta">{esc(meta)}</span>' if meta else ""
-            items.append(f'<li><span class="box"></span><span class="txt">{esc(t["content"])}'
-                         f'{meta_html}</span>{prio}</li>')
+            prio = '<span class="prio hoch">hoch</span>' if t["prio_hoch"] else ""
+            items.append(f'<li><span class="box"></span><span class="txt">{esc(t["content"])}{meta_html}</span>{prio}</li>')
         body = "\n".join(items) if items else '<li class="none">Keine offenen Aufgaben 🎉</li>'
         area_cards.append(f'''
     <div class="area {area_var[area]}">
@@ -206,28 +439,31 @@ def build_html(tasks, done_today, events, refresh_token):
       <ul class="tasks">{body}</ul>
     </div>''')
 
-    # --- Kacheln
     open_total = len(tasks)
     per_area = " · ".join(f"{a} {len([t for t in tasks if t['area']==a])}" for a in AREAS)
     todays_ev = ev_by_date.get(today.isoformat(), [])
-    future = [e for e in events if e["date"] >= today.isoformat() and (e["date"] > today.isoformat() or e["time"] >= now.strftime("%H:%M") or e["time"] == "")]
+    future = [e for e in events if e["date"] > today.isoformat()
+              or (e["date"] == today.isoformat() and (e["time"] == "" or e["time"] >= now.strftime("%H:%M")))]
     if future:
         ne = future[0]
         nd = date.fromisoformat(ne["date"])
         next_ev_title = esc(ne["title"])
-        next_ev_sub = f"{WD[nd.weekday()]}, {nd.day:02d}.{nd.month:02d}." + (f" · {ne['time']}" + (f"–{ne['end_time']}" if ne['end_time'] else "") if ne['time'] else " · ganztägig")
+        next_ev_sub = f"{WD[nd.weekday()]}, {nd.day:02d}.{nd.month:02d}." + \
+            (f" · {ne['time']}" + (f"–{ne['end_time']}" if ne["end_time"] else "") if ne["time"] else " · ganztägig")
     else:
         next_ev_title, next_ev_sub = "—", "keine anstehenden Termine"
     week_ev_count = sum(1 for e in events if monday.isoformat() <= e["date"] <= week_days[6].isoformat())
+    kw = today.isocalendar()[1]
 
-    # --- Termine heute Panel
     if todays_ev:
-        rows = "".join(f'<div class="event"><span class="time">{e["time"]}–{e["end_time"]}</span><span>{esc(e["title"])}</span></div>'
-                       if e["time"] else f'<div class="event"><span class="time">ganztägig</span><span>{esc(e["title"])}</span></div>'
-                       for e in todays_ev)
-        today_panel = rows
+        today_panel = "".join(
+            f'<div class="event"><span class="time">{e["time"]}–{e["end_time"]}</span><span>{esc(e["title"])}</span></div>'
+            if e["time"] else
+            f'<div class="event"><span class="time">ganztägig</span><span>{esc(e["title"])}</span></div>'
+            for e in todays_ev)
     else:
-        today_panel = f'<div class="empty"><span class="big">Keine Termine heute.</span><br>Nächster Termin: <strong style="color:var(--text-secondary)">{next_ev_title}</strong> ({next_ev_sub}).</div>'
+        today_panel = (f'<div class="empty"><span class="big">Keine Termine heute.</span><br>'
+                       f'Nächster Termin: <strong style="color:var(--text-secondary)">{next_ev_title}</strong> ({next_ev_sub}).</div>')
 
     # --- Woche
     day_cards = []
@@ -242,25 +478,61 @@ def build_html(tasks, done_today, events, refresh_token):
             parts.append(f'<div class="due"><span class="d" style="background:var(--{area_var[t["area"]]})"></span>{esc(t["content"])}</div>')
         day_cards.append(f'<div class="{cls}">{"".join(parts)}</div>')
 
-    # --- Monat
-    mcells = []
-    d = grid_start
-    while d < grid_end:
-        iso = d.isoformat()
-        cls = "mday"
-        if d.month != today.month: cls += " out"
-        if d == today: cls += " today"
-        num = f"{d.day:02d}.{d.month:02d}." if d.month != today.month else str(d.day)
-        chips = ""
-        for e in ev_by_date.get(iso, []):
-            past = " past" if iso < today.isoformat() else ""
-            label = (e["time"] + " " if e["time"] else "") + e["title"]
-            chips += f'<div class="chip{past}">{esc(label)}</div>'
-        mcells.append(f'<div class="{cls}"><div class="num">{num}</div>{chips}</div>')
-        d += timedelta(days=1)
+    # --- Monat: 14 Monate (Vormonat bis +12) mit Dropdown und Pfeilen
+    month_list = [ym_add(today.year, today.month, k) for k in range(-1, 13)]
+    options, month_wraps = [], []
+    for (y, m) in month_list:
+        key = f"{y}-{m:02d}"
+        sel = " selected" if (y, m) == (today.year, today.month) else ""
+        options.append(f'<option value="{key}"{sel}>{MONTHS[m-1]} {y}</option>')
+        active = " active" if (y, m) == (today.year, today.month) else ""
+        month_wraps.append(f'<div class="mwrap{active}" data-ym="{key}">{month_grid_html(y, m, ev_by_date, today)}</div>')
 
-    monday_iso = f"{monday.day}.–{week_days[6].day}. {MONTHS[week_days[6].month-1]} {week_days[6].year}"
-    kw = today.isocalendar()[1]
+    # --- Jahr: alle Termine der nächsten 12 Monate, nach Monat gruppiert
+    horizon = ym_add(today.year, today.month, 12)
+    year_groups, cur_key = [], None
+    upcoming = [e for e in events if e["date"] >= today.isoformat()
+                and date.fromisoformat(e["date"]) < date(horizon[0], horizon[1], 1)]
+    for e in upcoming:
+        d = date.fromisoformat(e["date"])
+        key = f"{MONTHS[d.month-1]} {d.year}"
+        if key != cur_key:
+            year_groups.append(f'<h3 class="ygroup">{key}</h3>')
+            cur_key = key
+        tstr = f'{e["time"]}–{e["end_time"]}' if e["time"] else "ganztägig"
+        year_groups.append(
+            f'<div class="event"><span class="time">{WD[d.weekday()]}, {d.day:02d}.{d.month:02d}. · {tstr}</span>'
+            f'<span>{esc(e["title"])}</span></div>')
+    year_html = "".join(year_groups) if year_groups else \
+        '<div class="empty">Keine Termine in den nächsten 12 Monaten.</div>'
+
+    # --- Cardshows
+    show_cards = []
+    for s in cardshows:
+        de_cls = " de" if s.get("is_de") else ""
+        badge = '<span class="debadge">🇩🇪 Deutschland</span>' if s.get("is_de") else ""
+        name = esc(s["name"])
+        if s.get("url"):
+            name = f'<a href="{esc(s["url"])}" target="_blank" rel="noopener">{name}</a>'
+        show_cards.append(f'''<div class="show{de_cls}">
+      <div class="show-date">{esc(fmt_show_date(s))}</div>
+      <div class="show-name">{name}{badge}</div>
+      <div class="show-loc">{esc(s["location"])}</div>
+    </div>''')
+    shows_note = ""
+    shows_html = "".join(show_cards) if show_cards else '<div class="empty">Keine kommenden Shows gefunden.</div>'
+
+    # --- News
+    news_panels = []
+    for src in news:
+        lis = "".join(f'<li><a href="{esc(i["url"])}" target="_blank" rel="noopener">{esc(i["title"])}</a></li>'
+                      for i in src["items"])
+        note = f'<div class="srcnote">{esc(src["note"])}</div>' if src.get("note") else ""
+        body = f"<ul class='newslist'>{lis}</ul>" if lis else ""
+        news_panels.append(f'''<div class="panel">
+      <h2><a href="{esc(src["home"])}" target="_blank" rel="noopener">{esc(src["name"])}</a></h2>
+      {body}{note or ("" if lis else '<div class="empty">Keine Meldungen verfügbar.</div>')}
+    </div>''')
 
     # --- Refresh-Knopf
     if refresh_token:
@@ -283,6 +555,10 @@ def build_html(tasks, done_today, events, refresh_token):
     else:
         refresh_html = f'<a class="refresh" href="https://github.com/{REPO}/actions/workflows/update.yml" target="_blank" rel="noopener">⟳ Jetzt aktualisieren</a>'
         refresh_js = ""
+
+    stand = now.strftime("%H:%M")
+    date_line = f"{WD_LONG[today.weekday()]}, {today.day}. {MONTHS[today.month-1]} {today.year} · Stand {stand} Uhr"
+    monday_iso = f"{monday.day}.–{week_days[6].day}. {MONTHS[week_days[6].month-1]} {week_days[6].year}"
 
     return f'''<!DOCTYPE html>
 <html lang="de">
@@ -311,6 +587,7 @@ def build_html(tasks, done_today, events, refresh_token):
   header {{ margin-bottom: 16px; display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }}
   header h1 {{ font-size: 22px; font-weight: 650; letter-spacing: -0.01em; }}
   header .date {{ color: var(--text-secondary); font-size: 14px; margin-top: 2px; }}
+  a {{ color: inherit; }}
   .refresh {{ padding: 8px 16px; font-size: 13px; font-weight: 600; border-radius: 99px; border: 1px solid var(--border);
              background: var(--surface-1); color: var(--text-secondary); cursor: pointer; text-decoration: none; display: inline-block; }}
   .refresh:disabled {{ opacity: .5; cursor: default; }}
@@ -344,11 +621,13 @@ def build_html(tasks, done_today, events, refresh_token):
   .prio {{ font-size: 11px; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--border); color: var(--text-secondary); white-space: nowrap; margin-top: 2px; }}
   .prio.hoch {{ border-color: #d03b3b; color: #d03b3b; }}
   .row2 {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; margin-bottom: 20px; }}
+  .row3 {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-bottom: 20px; }}
   .panel {{ background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }}
   .panel h2 {{ font-size: 15px; font-weight: 650; margin-bottom: 12px; }}
+  .panel h2 a {{ text-decoration: none; }}
   .event {{ display: flex; gap: 12px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--hairline); font-size: 14px; }}
   .event:last-child {{ border-bottom: none; }}
-  .event .time {{ color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 110px; }}
+  .event .time {{ color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 150px; }}
   .empty {{ color: var(--muted); font-size: 14px; padding: 8px 0; }}
   .empty .big {{ font-size: 15px; color: var(--text-secondary); }}
   .week-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 20px; }}
@@ -363,6 +642,10 @@ def build_html(tasks, done_today, events, refresh_token):
   .legend {{ display: flex; gap: 16px; font-size: 12px; color: var(--muted); margin-bottom: 20px; flex-wrap: wrap; }}
   .legend span {{ display: flex; gap: 6px; align-items: center; }}
   .legend .d {{ width: 8px; height: 8px; border-radius: 3px; }}
+  .mnav {{ display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }}
+  .mnav button {{ padding: 6px 14px; font-size: 15px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary); cursor: pointer; }}
+  .mnav select {{ padding: 7px 10px; font-size: 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); }}
+  .mwrap {{ display: none; }} .mwrap.active {{ display: block; }}
   .month-head {{ display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; font-size: 12px; color: var(--muted); margin-bottom: 6px; text-align: center; }}
   .month-grid {{ display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-bottom: 20px; }}
   .mday {{ background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; min-height: 72px; padding: 6px; font-size: 12px; }}
@@ -372,6 +655,23 @@ def build_html(tasks, done_today, events, refresh_token):
   .mday.today .num {{ color: var(--arbeit); }}
   .chip {{ font-size: 10.5px; line-height: 1.3; padding: 2px 5px; border-radius: 6px; background: rgba(42,120,214,0.12); border-left: 2px solid var(--arbeit); margin-bottom: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
   .chip.past {{ opacity: .55; }}
+  .ygroup {{ font-size: 14px; font-weight: 650; margin: 18px 0 6px; color: var(--text-secondary); }}
+  .ygroup:first-child {{ margin-top: 0; }}
+  .show {{ background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; }}
+  .show.de {{ border-left: 4px solid var(--privat); background: rgba(27,175,122,0.07); }}
+  .show-date {{ font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }}
+  .show-name {{ font-size: 15px; font-weight: 650; margin: 3px 0; }}
+  .show-name a {{ text-decoration: none; }}
+  .show-name a:hover {{ text-decoration: underline; }}
+  .debadge {{ font-size: 11px; font-weight: 600; color: var(--good-text); border: 1px solid var(--privat); border-radius: 99px; padding: 1px 8px; margin-left: 8px; white-space: nowrap; }}
+  .show-loc {{ font-size: 13px; color: var(--text-secondary); }}
+  .srcline {{ font-size: 12px; color: var(--muted); margin-bottom: 16px; }}
+  ul.newslist {{ list-style: none; }}
+  ul.newslist li {{ padding: 7px 0; border-bottom: 1px solid var(--hairline); font-size: 14px; line-height: 1.35; }}
+  ul.newslist li:last-child {{ border-bottom: none; }}
+  ul.newslist a {{ text-decoration: none; }}
+  ul.newslist a:hover {{ text-decoration: underline; }}
+  .srcnote {{ font-size: 12px; color: var(--muted); margin-top: 8px; }}
   footer {{ color: var(--muted); font-size: 12px; line-height: 1.5; border-top: 1px solid var(--hairline); padding-top: 12px; }}
   footer strong {{ color: var(--text-secondary); font-weight: 600; }}
 </style>
@@ -381,7 +681,7 @@ def build_html(tasks, done_today, events, refresh_token):
   <header>
     <div>
       <h1>Mein Dashboard</h1>
-      <div class="date">{fmt_date_line()}</div>
+      <div class="date">{date_line}</div>
     </div>
     <div>{refresh_html}</div>
   </header>
@@ -390,6 +690,9 @@ def build_html(tasks, done_today, events, refresh_token):
     <button class="active" data-view="view-today">Heute</button>
     <button data-view="view-week">Woche</button>
     <button data-view="view-month">Monat</button>
+    <button data-view="view-year">Jahr</button>
+    <button data-view="view-shows">Cardshows</button>
+    <button data-view="view-news">News</button>
   </nav>
 
   <div id="view-today" class="view active">
@@ -418,9 +721,29 @@ def build_html(tasks, done_today, events, refresh_token):
   </div>
 
   <div id="view-month" class="view">
-    <h2 class="vtitle">Monat im Überblick · {MONTHS[today.month-1]} {today.year}</h2>
-    <div class="month-head"><div>Mo</div><div>Di</div><div>Mi</div><div>Do</div><div>Fr</div><div>Sa</div><div>So</div></div>
-    <div class="month-grid">{"".join(mcells)}</div>
+    <div class="mnav">
+      <button id="mprev" title="Vorheriger Monat">‹</button>
+      <select id="msel">{"".join(options)}</select>
+      <button id="mnext" title="Nächster Monat">›</button>
+    </div>
+    {"".join(month_wraps)}
+  </div>
+
+  <div id="view-year" class="view">
+    <h2 class="vtitle">Alle Termine · nächste 12 Monate</h2>
+    {year_html}
+  </div>
+
+  <div id="view-shows" class="view">
+    <h2 class="vtitle">Cardshows &amp; Trade Events</h2>
+    <div class="srcline">Quelle: <a href="https://gradedmoments.de/cardshows/" target="_blank" rel="noopener">gradedmoments.de</a> · Stand {stand} Uhr{" · " + esc(shows_note) if shows_note else ""} · <span style="color:var(--good-text)">🇩🇪 = Show in Deutschland</span></div>
+    {shows_html}
+  </div>
+
+  <div id="view-news" class="view">
+    <h2 class="vtitle">News</h2>
+    <div class="srcline">Stand {stand} Uhr · aktualisiert sich mit jedem Dashboard-Update</div>
+    <div class="row3">{"".join(news_panels)}</div>
   </div>
 
   <footer>
@@ -437,6 +760,18 @@ def build_html(tasks, done_today, events, refresh_token):
       btn.classList.add('active');
       document.getElementById(btn.dataset.view).classList.add('active');
     }});
+  }});
+  const msel = document.getElementById('msel');
+  function showMonth(key) {{
+    document.querySelectorAll('.mwrap').forEach(w => w.classList.toggle('active', w.dataset.ym === key));
+    msel.value = key;
+  }}
+  msel.addEventListener('change', () => showMonth(msel.value));
+  document.getElementById('mprev').addEventListener('click', () => {{
+    if (msel.selectedIndex > 0) {{ msel.selectedIndex--; showMonth(msel.value); }}
+  }});
+  document.getElementById('mnext').addEventListener('click', () => {{
+    if (msel.selectedIndex < msel.options.length - 1) {{ msel.selectedIndex++; showMonth(msel.value); }}
   }});{refresh_js}
 </script>
 </body>
@@ -449,9 +784,8 @@ def encrypt_page(plain_html, password):
     from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
     from cryptography.hazmat.primitives import hashes
     import hashlib
-    # Deterministisch aus Inhalt + Passwort abgeleitet: identischer Inhalt
-    # ergibt identische Datei -> kein unnötiger Commit alle 30 Minuten.
-    # (Nonce-Wiederverwendung ist ausgeschlossen: anderer Inhalt -> anderer Seed.)
+    # Deterministisch aus Inhalt + Passwort abgeleitet (kein Nonce-Reuse möglich,
+    # da anderer Inhalt -> anderer Seed).
     seed = hashlib.sha256(password.encode() + plain_html.encode()).digest()
     salt = seed[:16]
     iv = hashlib.sha256(seed + b"iv").digest()[:12]
@@ -537,34 +871,37 @@ document.getElementById('f').addEventListener('submit', async ev => {
 
 # ------------------------------------------------------------------ main ---
 def main():
-    password = os.environ.get("DASH_PASSWORD")
+    password = (os.environ.get("DASH_PASSWORD") or "").strip()
     if not password:
         sys.exit("FEHLER: Secret DASH_PASSWORD fehlt.")
-    refresh_token = os.environ.get("REFRESH_TOKEN") or None
+    refresh_token = (os.environ.get("REFRESH_TOKEN") or "").strip() or None
     now = datetime.now(TZ)
     today = now.date()
 
     if os.environ.get("DASH_TEST") == "1":
-        tasks, done_today, events = testdata(today)
+        tasks, done_today, events, cardshows, news = testdata(today)
     else:
-        token, ics = os.environ.get("TODOIST_TOKEN"), os.environ.get("ICS_URL")
+        token = (os.environ.get("TODOIST_TOKEN") or "").strip()
+        ics = (os.environ.get("ICS_URL") or "").strip()
         tasks, done_today = fetch_todoist(token) if token else ([], 0)
         if ics:
-            month_first = today.replace(day=1)
-            start = datetime.combine(min(today - timedelta(days=today.weekday()), month_first), datetime.min.time(), TZ)
-            next_month = (month_first.replace(day=28) + timedelta(days=7)).replace(day=1)
-            end = datetime.combine(next_month + timedelta(days=7), datetime.min.time(), TZ)
+            y0, m0 = ym_add(today.year, today.month, -1)
+            y1, m1 = ym_add(today.year, today.month, 13)
+            start = datetime.combine(date(y0, m0, 1) - timedelta(days=7), datetime.min.time(), TZ)
+            end = datetime.combine(date(y1, m1, 1) + timedelta(days=7), datetime.min.time(), TZ)
             events = fetch_events(ics, start, end)
+            print(f"Kalender: {len(events)} Termine geladen")
         else:
             events = []
-        print(f"Kalender: {len(events)} Termine geladen")
+        cardshows, _ = fetch_cardshows(today)
+        news = fetch_news()
 
-    plain = build_html(tasks, done_today, events, refresh_token)
+    plain = build_html(tasks, done_today, events, cardshows, news, refresh_token)
     encrypted = encrypt_page(plain, password)
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(encrypted)
-    print(f"OK: index.html geschrieben ({len(encrypted)} Zeichen), "
-          f"{len(tasks)} Aufgaben, {len(events)} Termine, Stand {now.strftime('%H:%M')} Uhr")
+    print(f"OK: index.html geschrieben ({len(encrypted)} Zeichen), {len(tasks)} Aufgaben, "
+          f"{len(events)} Termine, {len(cardshows)} Cardshows, Stand {now.strftime('%H:%M')} Uhr")
 
 
 if __name__ == "__main__":
