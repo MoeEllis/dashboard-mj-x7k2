@@ -29,7 +29,10 @@ WD = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
 WD_LONG = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 MONTHS = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli",
           "August", "September", "Oktober", "November", "Dezember"]
-CARDSHOWS_ICS = "https://gradedmoments.de/cardshows/?ical=1"
+CARDSHOWS_URL = "https://gradedmoments.de/cardshows/"
+MONTH_NUM = {"januar": 1, "februar": 2, "märz": 3, "maerz": 3, "april": 4, "mai": 5,
+             "juni": 6, "juli": 7, "august": 8, "september": 9, "oktober": 10,
+             "november": 11, "dezember": 12}
 UA = {"User-Agent": "Mozilla/5.0 (compatible; PersonalDashboard/1.0)"}
 
 esc = html.escape
@@ -163,87 +166,87 @@ def fetch_events(ics_url, start, end):
 
 
 # -------------------------------------------------------------- Cardshows ---
-def _ics_unfold(text):
-    """RFC-5545-Zeilenfaltung auflösen."""
-    lines = []
-    for raw in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        if raw[:1] in (" ", "\t") and lines:
-            lines[-1] += raw[1:]
-        else:
-            lines.append(raw)
-    return lines
+_DATE_DE = re.compile(r"(\d{1,2})\.\s*(Januar|Februar|März|Maerz|April|Mai|Juni|Juli|August|"
+                      r"September|Oktober|November|Dezember)\s*(\d{4})", re.IGNORECASE)
+_TIME_RE = re.compile(r"\b(\d{1,2}):(\d{2})\b")
+_TAG_RE = re.compile(r"<[^>]+>")
 
 
-def _ics_unescape(v):
-    return (v.replace("\\n", " ").replace("\\N", " ")
-             .replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\").strip())
+def _strip_tags(s):
+    return re.sub(r"\s+", " ", html.unescape(_TAG_RE.sub(" ", s))).strip()
 
 
-def _ics_dt(params, value):
-    """Liefert (date, 'HH:MM' | None)."""
-    value = value.strip()
-    if "VALUE=DATE" in params.upper() or (len(value) == 8 and value.isdigit()):
-        return date(int(value[:4]), int(value[4:6]), int(value[6:8])), None
-    v = value.rstrip("Zz")
-    d = date(int(v[:4]), int(v[4:6]), int(v[6:8]))
-    return d, f"{v[9:11]}:{v[11:13]}"
-
-
-def parse_cardshows(ics_bytes, today):
-    """Parst den iCal-Export von gradedmoments.de (ohne Zusatzbibliothek –
-    der Feed enthält nur einfache Einzeltermine)."""
-    if isinstance(ics_bytes, bytes):
-        ics_bytes = ics_bytes.decode("utf-8", errors="replace")
-    shows, ev = [], None
-    for line in _ics_unfold(ics_bytes):
-        u = line.upper()
-        if u.startswith("BEGIN:VEVENT"):
-            ev = {}
-        elif u.startswith("END:VEVENT") and ev is not None:
-            if "DTSTART" in ev:
-                sdate, stime = ev["DTSTART"]
-                edate, etime = ev.get("DTEND", (None, None))
-                if edate and etime is None and edate != sdate:
-                    edate = edate - timedelta(days=1)  # ganztägig: DTEND exklusiv
-                end_ref = edate or sdate
-                if end_ref >= today:
-                    loc = ev.get("LOCATION", "")
-                    low = loc.lower()
-                    shows.append({
-                        "start": sdate.isoformat(),
-                        "end": edate.isoformat() if edate else None,
-                        "time": stime, "end_time": etime,
-                        "name": ev.get("SUMMARY", "Cardshow"),
-                        "location": loc,
-                        "url": ev.get("URL", ""),
-                        "is_de": ("deutschland" in low) or ("germany" in low),
-                    })
-            ev = None
-        elif ev is not None and ":" in line:
-            head, _, value = line.partition(":")
-            prop, _, params = head.partition(";")
-            prop = prop.strip().upper()
-            if prop in ("DTSTART", "DTEND"):
-                try:
-                    ev[prop] = _ics_dt(params, value)
-                except Exception:
-                    pass
-            elif prop in ("SUMMARY", "LOCATION", "URL"):
-                ev[prop] = _ics_unescape(value)
+def parse_cardshows(html_text, today):
+    """Parst die Event-Tabelle von gradedmoments.de/cardshows.
+    (Der iCal-Export der Seite enthält nur Alt-Termine bis 2024 und ist unbrauchbar –
+    deshalb wird die sichtbare Tabelle geparst.)"""
+    if isinstance(html_text, bytes):
+        html_text = html_text.decode("utf-8", errors="replace")
+    shows = []
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", html_text, re.S | re.I):
+        link = re.search(r'<a[^>]+href="(https?://(?:www\.)?gradedmoments\.de/events/[^"]+)"[^>]*>(.*?)</a>',
+                         row, re.S | re.I)
+        if not link:
+            continue
+        url, name = link.group(1), _strip_tags(link.group(2))
+        text = _strip_tags(row)
+        dates = _DATE_DE.findall(text)
+        if not dates or not name:
+            continue
+        def to_date(m):
+            return date(int(m[2]), MONTH_NUM[m[1].lower()], int(m[0]))
+        try:
+            sdate = to_date(dates[0])
+            edate = to_date(dates[1]) if len(dates) > 1 else None
+        except Exception:
+            continue
+        times = _TIME_RE.findall(text)
+        stime = f"{int(times[0][0]):02d}:{times[0][1]}" if times else None
+        etime = f"{int(times[1][0]):02d}:{times[1][1]}" if len(times) > 1 else None
+        # Ort: Text nach dem Veranstaltungsnamen bis "Kategorie"
+        loc = ""
+        pos = text.find(name)
+        if pos >= 0:
+            tail = text[pos + len(name):]
+            kat = re.search(r"[-–]\s*Kategorie", tail)
+            loc = tail[:kat.start()] if kat else tail
+            loc = loc.strip(" -–*·|")
+        low = text.lower()
+        end_ref = edate or sdate
+        if end_ref < today:
+            continue
+        shows.append({
+            "start": sdate.isoformat(), "end": edate.isoformat() if edate else None,
+            "time": stime, "end_time": etime,
+            "name": name, "location": loc, "url": url,
+            "is_de": ("deutschland" in low) or ("germany" in low),
+        })
     shows.sort(key=lambda s: s["start"])
-    return shows[:40]
+    return shows
 
 
 def fetch_cardshows(today):
+    """Liest ALLE Seiten der Event-Übersicht (Pagination: ?pno=2, ?pno=3, …)."""
     import requests
     try:
-        r = requests.get(CARDSHOWS_ICS, timeout=30, headers=UA)
-        r.raise_for_status()
-        shows = parse_cardshows(r.content, today)
+        shows, seen = [], set()
+        for p in range(1, 11):  # Sicherheitsgrenze: max. 10 Seiten
+            url = CARDSHOWS_URL if p == 1 else f"{CARDSHOWS_URL}?pno={p}"
+            r = requests.get(url, timeout=30, headers=UA)
+            r.raise_for_status()
+            page_shows = parse_cardshows(r.text, today)
+            new = [s for s in page_shows if (s["start"], s["name"]) not in seen]
+            if not new:
+                break
+            for s in new:
+                seen.add((s["start"], s["name"]))
+            shows.extend(new)
         if not shows:
-            raise ValueError("keine kommenden Shows gefunden")
+            raise ValueError("keine kommenden Shows in der Seite gefunden")
+        shows.sort(key=lambda s: s["start"])
+        shows = shows[:200]
         save_cache("cardshows", shows)
-        print(f"Cardshows: {len(shows)} kommende Shows geladen")
+        print(f"Cardshows: {len(shows)} kommende Shows geladen ({p} Seite(n) gelesen)")
         return shows, None
     except Exception as e:
         cached = load_cache("cardshows")
@@ -399,7 +402,7 @@ def fmt_show_date(s):
     return base
 
 
-def build_html(tasks, done_today, events, cardshows, news, refresh_token):
+def build_html(tasks, done_today, events, cardshows, news, refresh_token, shows_note=None):
     now = datetime.now(TZ)
     today = now.date()
     monday = today - timedelta(days=today.weekday())
@@ -506,21 +509,30 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token):
     year_html = "".join(year_groups) if year_groups else \
         '<div class="empty">Keine Termine in den nächsten 12 Monaten.</div>'
 
-    # --- Cardshows
-    show_cards = []
+    # --- Cardshows (gruppiert nach Monat/Jahr)
+    show_parts, cur_group = [], None
+    de_count = 0
     for s in cardshows:
+        sd = date.fromisoformat(s["start"])
+        group = f"{MONTHS[sd.month-1]} {sd.year}"
+        if group != cur_group:
+            show_parts.append(f'<h3 class="ygroup">{group}</h3>')
+            cur_group = group
         de_cls = " de" if s.get("is_de") else ""
+        if s.get("is_de"):
+            de_count += 1
         badge = '<span class="debadge">🇩🇪 Deutschland</span>' if s.get("is_de") else ""
         name = esc(s["name"])
         if s.get("url"):
             name = f'<a href="{esc(s["url"])}" target="_blank" rel="noopener">{name}</a>'
-        show_cards.append(f'''<div class="show{de_cls}">
+        show_parts.append(f'''<div class="show{de_cls}">
       <div class="show-date">{esc(fmt_show_date(s))}</div>
       <div class="show-name">{name}{badge}</div>
       <div class="show-loc">{esc(s["location"])}</div>
     </div>''')
-    shows_note = ""
-    shows_html = "".join(show_cards) if show_cards else '<div class="empty">Keine kommenden Shows gefunden.</div>'
+    shows_note = shows_note or ""
+    shows_stat = f"{len(cardshows)} kommende Shows, davon {de_count} in Deutschland" if cardshows else ""
+    shows_html = "".join(show_parts) if show_parts else '<div class="empty">Keine kommenden Shows gefunden.</div>'
 
     # --- News
     news_panels = []
@@ -736,7 +748,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token):
 
   <div id="view-shows" class="view">
     <h2 class="vtitle">Cardshows &amp; Trade Events</h2>
-    <div class="srcline">Quelle: <a href="https://gradedmoments.de/cardshows/" target="_blank" rel="noopener">gradedmoments.de</a> · Stand {stand} Uhr{" · " + esc(shows_note) if shows_note else ""} · <span style="color:var(--good-text)">🇩🇪 = Show in Deutschland</span></div>
+    <div class="srcline">Quelle: <a href="https://gradedmoments.de/cardshows/" target="_blank" rel="noopener">gradedmoments.de</a> · Stand {stand} Uhr{" · " + shows_stat if shows_stat else ""}{" · " + esc(shows_note) if shows_note else ""} · <span style="color:var(--good-text)">🇩🇪 = Show in Deutschland</span></div>
     {shows_html}
   </div>
 
@@ -878,6 +890,7 @@ def main():
     now = datetime.now(TZ)
     today = now.date()
 
+    shows_note = None
     if os.environ.get("DASH_TEST") == "1":
         tasks, done_today, events, cardshows, news = testdata(today)
     else:
@@ -893,10 +906,10 @@ def main():
             print(f"Kalender: {len(events)} Termine geladen")
         else:
             events = []
-        cardshows, _ = fetch_cardshows(today)
+        cardshows, shows_note = fetch_cardshows(today)
         news = fetch_news()
 
-    plain = build_html(tasks, done_today, events, cardshows, news, refresh_token)
+    plain = build_html(tasks, done_today, events, cardshows, news, refresh_token, shows_note)
     encrypted = encrypt_page(plain, password)
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(encrypted)
