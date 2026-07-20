@@ -785,7 +785,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
             if cur_group is not None:
                 show_parts.append("</div>")
             show_parts.append(f'<div class="sgroup" data-month="{mkey}"><h3 class="ygroup">{group}</h3>')
-            show_month_chips.append(f'<button class="chip" data-v="{mkey}">{group}</button>')
+            show_month_chips.append(f'<button class="fchip" data-v="{mkey}">{group}</button>')
             cur_group = group
         de_cls = " de" if s.get("is_de") else ""
         if s.get("is_de"):
@@ -804,7 +804,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     shows_note = shows_note or ""
     shows_stat = f"{len(cardshows)} kommende Shows, davon {de_count} in Deutschland" if cardshows else ""
     shows_filter = (f'<div class="filterrow"><span class="flabel">Monat:</span>'
-                    f'<button class="chip active" data-v="">Alle</button>{"".join(show_month_chips)}</div>'
+                    f'<button class="fchip active" data-v="">Alle</button>{"".join(show_month_chips)}</div>'
                     if show_month_chips else "")
     shows_html = "".join(show_parts) if show_parts else '<div class="empty">Keine kommenden Shows gefunden.</div>'
 
@@ -845,7 +845,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
             if cur is not None:
                 rel_parts.append("</div>")
             rel_parts.append(f'<div class="mgroup" data-month="{mkey}"><h3 class="ygroup">{group}</h3>')
-            rel_month_chips.append(f'<button class="chip" data-dim="month" data-v="{mkey}">{group}</button>')
+            rel_month_chips.append(f'<button class="fchip" data-dim="month" data-v="{mkey}">{group}</button>')
             cur = group
         rel_parts.append(rel_row(r))
     if cur is not None:
@@ -854,7 +854,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
         rel_parts.append('<div class="mgroup" data-month="tbd"><h3 class="ygroup">Ohne Termin (TBD)</h3>')
         rel_parts.extend(rel_row(r) for r in rel_tbd)
         rel_parts.append("</div>")
-        rel_month_chips.append('<button class="chip" data-dim="month" data-v="tbd">TBD</button>')
+        rel_month_chips.append('<button class="fchip" data-dim="month" data-v="tbd">TBD</button>')
     past_parts, cur = [], None
     for r in rel_past:
         d = date.fromisoformat(r["date"])
@@ -870,14 +870,14 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
         past_parts.append("</div>")
     rel_past_html = (f'<details class="pastbox"><summary>Vergangene Releases anzeigen ({len(rel_past)})</summary>'
                      f'{"".join(past_parts)}</details>') if rel_past else ""
-    maker_chips = "".join(f'<button class="chip" data-dim="maker" data-v="{esc(m)}">{esc(m)}</button>'
+    maker_chips = "".join(f'<button class="fchip" data-dim="maker" data-v="{esc(m)}">{esc(m)}</button>'
                           for m in rel_makers)
-    cat_chips = "".join(f'<button class="chip" data-dim="cat" data-v="{esc(c)}">{esc(c)}</button>'
+    cat_chips = "".join(f'<button class="fchip" data-dim="cat" data-v="{esc(c)}">{esc(c)}</button>'
                         for c in rel_cats)
     rel_filters_html = f'''
-    <div class="filterrow"><span class="flabel">Hersteller:</span><button class="chip active" data-dim="maker" data-v="">Alle</button>{maker_chips}</div>
-    <div class="filterrow"><span class="flabel">Kategorie:</span><button class="chip active" data-dim="cat" data-v="">Alle</button>{cat_chips}</div>
-    <div class="filterrow"><span class="flabel">Monat:</span><button class="chip active" data-dim="month" data-v="">Alle</button>{"".join(rel_month_chips)}</div>'''
+    <div class="filterrow"><span class="flabel">Hersteller:</span><button class="fchip active" data-dim="maker" data-v="">Alle</button>{maker_chips}</div>
+    <div class="filterrow"><span class="flabel">Kategorie:</span><button class="fchip active" data-dim="cat" data-v="">Alle</button>{cat_chips}</div>
+    <div class="filterrow"><span class="flabel">Monat:</span><button class="fchip active" data-dim="month" data-v="">Alle</button>{"".join(rel_month_chips)}</div>'''
     rel_stat = (f"{len(rel_upcoming)} kommende · {len(rel_tbd)} ohne Termin · {len(rel_past)} vergangene"
                 if releases else "")
     releases_note = releases_note or ""
@@ -1044,9 +1044,9 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   .srcline {{ font-size: 12px; color: var(--muted); margin-bottom: 16px; }}
   .filterrow {{ display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }}
   .flabel {{ font-size: 12px; color: var(--muted); min-width: 80px; }}
-  .chip {{ padding: 4px 12px; font-size: 12px; font-weight: 600; border-radius: 99px;
+  .fchip {{ padding: 4px 12px; font-size: 12px; font-weight: 600; border-radius: 99px;
           border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary); cursor: pointer; }}
-  .chip.active {{ background: var(--arbeit); color: #fff; border-color: var(--arbeit); }}
+  .fchip.active {{ background: var(--arbeit); color: #fff; border-color: var(--arbeit); }}
   .rel {{ display: flex; gap: 10px; align-items: baseline; padding: 8px 12px; flex-wrap: wrap;
          background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 6px; font-size: 14px; }}
   .rel.past {{ opacity: .6; }}
@@ -1185,8 +1185,8 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     if (msel.selectedIndex < msel.options.length - 1) {{ msel.selectedIndex++; showMonth(msel.value); }}
   }});
   // Cardshows: Monats-Chips
-  document.querySelectorAll('#view-shows .chip').forEach(c => c.addEventListener('click', () => {{
-    document.querySelectorAll('#view-shows .chip').forEach(x => x.classList.toggle('active', x === c));
+  document.querySelectorAll('#view-shows .fchip').forEach(c => c.addEventListener('click', () => {{
+    document.querySelectorAll('#view-shows .fchip').forEach(x => x.classList.toggle('active', x === c));
     const v = c.dataset.v;
     document.querySelectorAll('#view-shows .sgroup').forEach(g =>
       g.style.display = (!v || g.dataset.month === v) ? '' : 'none');
@@ -1204,10 +1204,10 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
       const any = Array.from(g.querySelectorAll('.rel')).some(e => e.style.display !== 'none');
       g.style.display = any ? '' : 'none';
     }});
-    document.querySelectorAll('#view-releases .chip').forEach(c =>
+    document.querySelectorAll('#view-releases .fchip').forEach(c =>
       c.classList.toggle('active', relF[c.dataset.dim] === c.dataset.v));
   }}
-  document.querySelectorAll('#view-releases .chip').forEach(c => c.addEventListener('click', () => {{
+  document.querySelectorAll('#view-releases .fchip').forEach(c => c.addEventListener('click', () => {{
     relF[c.dataset.dim] = c.dataset.v; applyRel();
   }}));
   document.querySelectorAll('#view-releases .mk').forEach(b => b.addEventListener('click', () => {{
