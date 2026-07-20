@@ -587,7 +587,7 @@ def month_grid_html(y, m, ev_by_date, today):
         for e in ev_by_date.get(iso, []):
             past = " past" if iso < today.isoformat() else ""
             label = (e["time"] + " " if e["time"] else "") + ev_label(e)
-            chips += f'<div class="chip{past}">{esc(label)}</div>'
+            chips += f'<div class="chip{past}" title="{esc(label)}">{esc(label)}</div>'
         cells.append(f'<div class="{cls}"><div class="num">{num}</div>{chips}</div>')
         d += timedelta(days=1)
     head = "".join(f"<div>{w}</div>" for w in WD)
@@ -1029,7 +1029,9 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   .mday.out {{ opacity: .4; }}
   .mday.today {{ border-color: var(--arbeit); box-shadow: 0 0 0 1px var(--arbeit); }}
   .mday.today .num {{ color: var(--arbeit); }}
-  .chip {{ font-size: 10.5px; line-height: 1.3; padding: 2px 5px; border-radius: 6px; background: rgba(42,120,214,0.12); border-left: 2px solid var(--arbeit); margin-bottom: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .chip {{ font-size: 10.5px; line-height: 1.3; padding: 2px 5px; border-radius: 6px; background: rgba(42,120,214,0.12); border-left: 2px solid var(--arbeit); margin-bottom: 3px;
+          white-space: normal; overflow-wrap: break-word; overflow: hidden;
+          display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; cursor: default; }}
   .chip.past {{ opacity: .55; }}
   .ygroup {{ font-size: 14px; font-weight: 650; margin: 18px 0 6px; color: var(--text-secondary); }}
   .ygroup:first-child {{ margin-top: 0; }}
