@@ -165,10 +165,22 @@ def fetch_events(ics_url, start, end):
         if isinstance(dtstart, datetime):
             local = dtstart.astimezone(TZ)
             d, tm = local.date(), local.strftime("%H:%M")
-            te = dtend.astimezone(TZ).strftime("%H:%M") if isinstance(dtend, datetime) else ""
+            if isinstance(dtend, datetime):
+                end_local = dtend.astimezone(TZ)
+                te, end_d = end_local.strftime("%H:%M"), end_local.date()
+                # Endet exakt um Mitternacht: gehört noch zum Vortag (sonst "Phantom-Tag" ohne Inhalt)
+                if end_d > d and end_local.time() == datetime.min.time():
+                    end_d -= timedelta(days=1)
+            else:
+                te, end_d = "", d
         else:
+            # Ganztägiger Termin: DTSTART/DTEND sind reine Datumswerte, DTEND ist laut
+            # iCal-Spec EXKLUSIV (der Tag NACH dem letzten Tag) und muss daher -1 Tag gerechnet werden.
             d, tm, te = dtstart, "", ""
-        out.append({"date": d.isoformat(), "time": tm, "end_time": te, "title": title})
+            end_d = (dtend - timedelta(days=1)) if isinstance(dtend, date) and dtend > dtstart else d
+        if end_d < d:
+            end_d = d
+        out.append({"date": d.isoformat(), "end_date": end_d.isoformat(), "time": tm, "end_time": te, "title": title})
     out.sort(key=lambda e: (e["date"], e["time"]))
     return out
 
@@ -485,10 +497,16 @@ def testdata(today):
         {"area": "Studium", "content": "Übungsblatt bearbeiten", "project": "Mathe II", "due": (today + timedelta(days=3)).isoformat(), "prio_hoch": True},
     ]
     events = [
-        {"date": (today + timedelta(days=3)).isoformat(), "time": "08:00", "end_time": "08:20", "title": "Physio ZAR"},
-        {"date": (today + timedelta(days=8)).isoformat(), "time": "17:15", "end_time": "17:35", "title": "Physio ZAR"},
-        {"date": (today + timedelta(days=45)).isoformat(), "time": "", "end_time": "", "title": "Urlaub Start"},
-        {"date": (today + timedelta(days=100)).isoformat(), "time": "10:00", "end_time": "12:00", "title": "Zahnarzt"},
+        {"date": (today + timedelta(days=3)).isoformat(), "end_date": (today + timedelta(days=3)).isoformat(),
+         "time": "08:00", "end_time": "08:20", "title": "Physio ZAR"},
+        {"date": (today + timedelta(days=5)).isoformat(), "end_date": (today + timedelta(days=6)).isoformat(),
+         "time": "", "end_time": "", "title": "[Sportmanagement] Grundlagen Sportbusiness · Vor Ort: Nürtingen"},
+        {"date": (today + timedelta(days=8)).isoformat(), "end_date": (today + timedelta(days=8)).isoformat(),
+         "time": "17:15", "end_time": "17:35", "title": "Physio ZAR"},
+        {"date": (today + timedelta(days=45)).isoformat(), "end_date": (today + timedelta(days=47)).isoformat(),
+         "time": "", "end_time": "", "title": "Urlaub Start"},
+        {"date": (today + timedelta(days=100)).isoformat(), "end_date": (today + timedelta(days=100)).isoformat(),
+         "time": "10:00", "end_time": "12:00", "title": "Zahnarzt"},
     ]
     shows = [
         {"start": (today + timedelta(days=2)).isoformat(), "end": (today + timedelta(days=5)).isoformat(),
@@ -545,6 +563,14 @@ def testdata(today):
 
 
 # ------------------------------------------------------------------ HTML ---
+def ev_label(e):
+    """Titel eines Termins, bei mehrtägigen Terminen mit Tag-X/Y-Hinweis."""
+    total = e.get("multi_total", 1)
+    if total > 1:
+        return f'{e["title"]} · Tag {e["multi_day"]}/{total}'
+    return e["title"]
+
+
 def month_grid_html(y, m, ev_by_date, today):
     first = date(y, m, 1)
     nxt = (first.replace(day=28) + timedelta(days=7)).replace(day=1)
@@ -560,7 +586,7 @@ def month_grid_html(y, m, ev_by_date, today):
         chips = ""
         for e in ev_by_date.get(iso, []):
             past = " past" if iso < today.isoformat() else ""
-            label = (e["time"] + " " if e["time"] else "") + e["title"]
+            label = (e["time"] + " " if e["time"] else "") + ev_label(e)
             chips += f'<div class="chip{past}">{esc(label)}</div>'
         cells.append(f'<div class="{cls}"><div class="num">{num}</div>{chips}</div>')
         d += timedelta(days=1)
@@ -594,9 +620,16 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     monday = today - timedelta(days=today.weekday())
     week_days = [monday + timedelta(days=i) for i in range(7)]
 
+    # Mehrtägige Termine an jedem betroffenen Tag einsortieren (nicht nur am Starttag).
     ev_by_date = {}
     for e in events:
-        ev_by_date.setdefault(e["date"], []).append(e)
+        d0 = date.fromisoformat(e["date"])
+        d1 = date.fromisoformat(e.get("end_date", e["date"]))
+        span = min((d1 - d0).days, 365) + 1  # Sicherheitsgrenze gegen fehlerhafte ICS-Daten
+        for i in range(span):
+            cur = d0 + timedelta(days=i)
+            entry = e if span == 1 else {**e, "multi_day": i + 1, "multi_total": span}
+            ev_by_date.setdefault(cur.isoformat(), []).append(entry)
     task_by_date = {}
     for t in tasks:
         if t["due"]:
@@ -678,14 +711,16 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
             (f" · {ne['time']}" + (f"–{ne['end_time']}" if ne["end_time"] else "") if ne["time"] else " · ganztägig")
     else:
         next_ev_title, next_ev_sub = "—", "keine anstehenden Termine"
-    week_ev_count = sum(1 for e in events if monday.isoformat() <= e["date"] <= week_days[6].isoformat())
+    week_ev_count = sum(1 for e in events
+                        if e["date"] <= week_days[6].isoformat()
+                        and e.get("end_date", e["date"]) >= monday.isoformat())
     kw = today.isocalendar()[1]
 
     if todays_ev:
         today_panel = "".join(
-            f'<div class="event"><span class="time">{e["time"]}–{e["end_time"]}</span><span>{esc(e["title"])}</span></div>'
+            f'<div class="event"><span class="time">{e["time"]}–{e["end_time"]}</span><span>{esc(ev_label(e))}</span></div>'
             if e["time"] else
-            f'<div class="event"><span class="time">ganztägig</span><span>{esc(e["title"])}</span></div>'
+            f'<div class="event"><span class="time">ganztägig</span><span>{esc(ev_label(e))}</span></div>'
             for e in todays_ev)
     else:
         today_panel = (f'<div class="empty"><span class="big">Keine Termine heute.</span><br>'
@@ -699,7 +734,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
         parts = [f'<h3>{WD[d.weekday()]} <span>{d.day:02d}.{d.month:02d}.{" · heute" if d == today else ""}</span></h3>']
         for e in ev_by_date.get(iso, []):
             tstr = f'<span class="t">{e["time"]}–{e["end_time"]}</span> · ' if e["time"] else ""
-            parts.append(f'<div class="ev">{tstr}{esc(e["title"])}</div>')
+            parts.append(f'<div class="ev">{tstr}{esc(ev_label(e))}</div>')
         for t in task_by_date.get(iso, []):
             parts.append(f'<div class="due"><span class="d" style="background:var(--{area_var[t["area"]]})"></span>{esc(t["content"])}</div>')
         day_cards.append(f'<div class="{cls}">{"".join(parts)}</div>')
@@ -721,13 +756,20 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
                 and date.fromisoformat(e["date"]) < date(horizon[0], horizon[1], 1)]
     for e in upcoming:
         d = date.fromisoformat(e["date"])
+        d_end = date.fromisoformat(e.get("end_date", e["date"]))
         key = f"{MONTHS[d.month-1]} {d.year}"
         if key != cur_key:
             year_groups.append(f'<h3 class="ygroup">{key}</h3>')
             cur_key = key
         tstr = f'{e["time"]}–{e["end_time"]}' if e["time"] else "ganztägig"
+        if d_end == d:
+            dstr = f"{WD[d.weekday()]}, {d.day:02d}.{d.month:02d}."
+        elif d_end.month == d.month and d_end.year == d.year:
+            dstr = f"{d.day:02d}.–{d_end.day:02d}.{d_end.month:02d}."
+        else:
+            dstr = f"{d.day:02d}.{d.month:02d}.–{d_end.day:02d}.{d_end.month:02d}."
         year_groups.append(
-            f'<div class="event"><span class="time">{WD[d.weekday()]}, {d.day:02d}.{d.month:02d}. · {tstr}</span>'
+            f'<div class="event"><span class="time">{dstr} · {tstr}</span>'
             f'<span>{esc(e["title"])}</span></div>')
     year_html = "".join(year_groups) if year_groups else \
         '<div class="empty">Keine Termine in den nächsten 12 Monaten.</div>'
