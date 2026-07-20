@@ -1022,9 +1022,9 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   .mnav button {{ padding: 6px 14px; font-size: 15px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary); cursor: pointer; }}
   .mnav select {{ padding: 7px 10px; font-size: 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); }}
   .mwrap {{ display: none; }} .mwrap.active {{ display: block; }}
-  .month-head {{ display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; font-size: 12px; color: var(--muted); margin-bottom: 6px; text-align: center; }}
-  .month-grid {{ display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-bottom: 20px; }}
-  .mday {{ background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; min-height: 72px; padding: 6px; font-size: 12px; }}
+  .month-head {{ display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; font-size: 12px; color: var(--muted); margin-bottom: 6px; text-align: center; }}
+  .month-grid {{ display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; margin-bottom: 20px; }}
+  .mday {{ background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; min-height: 72px; padding: 6px; font-size: 12px; min-width: 0; overflow: hidden; }}
   .mday .num {{ font-weight: 600; font-size: 12px; margin-bottom: 4px; color: var(--text-secondary); }}
   .mday.out {{ opacity: .4; }}
   .mday.today {{ border-color: var(--arbeit); box-shadow: 0 0 0 1px var(--arbeit); }}
