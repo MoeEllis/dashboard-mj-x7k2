@@ -420,32 +420,80 @@ def fetch_trello(key, token, today):
 
 
 # ------------------------------------------------------------------- News ---
+_IMG_EXT_RE = re.compile(r"\.(?:jpe?g|png|webp|gif)(?:\?|$)", re.IGNORECASE)
+
+
 def parse_rss(xml_bytes, limit=8):
+    """Titel + Link je News-Item; Bild wird optional aus <enclosure>/Media-RSS
+    (media:content, media:thumbnail) ausgelesen, falls die Quelle das anbietet."""
     import xml.etree.ElementTree as ET
     root = ET.fromstring(xml_bytes)
+    MEDIA_NS = "{http://search.yahoo.com/mrss/}"
+
+    def find_image(item):
+        enc = item.find("enclosure")
+        if enc is not None:
+            url, typ = enc.get("url"), (enc.get("type") or "")
+            if url and (typ.startswith("image") or _IMG_EXT_RE.search(url)):
+                return url
+        for tag in (f"{MEDIA_NS}content", f"{MEDIA_NS}thumbnail"):
+            for el in item.iter(tag):
+                url, typ = el.get("url"), (el.get("type") or "")
+                if url and (not typ or typ.startswith("image") or _IMG_EXT_RE.search(url)):
+                    return url
+        return None
+
     items = []
     for item in root.iter("item"):
         title = (item.findtext("title") or "").strip()
         link = (item.findtext("link") or "").strip()
         if title and link:
-            items.append({"title": title, "url": link})
+            entry = {"title": title, "url": link}
+            image = find_image(item)
+            if image:
+                entry["image"] = image
+            items.append(entry)
         if len(items) >= limit:
             break
     return items
 
 
 def parse_ligainsider(html_text, limit=8):
+    """Auf ligainsider.de zeigen mehrere <a>-Tags (Bild-Caption + echte
+    Überschrift) auf dieselbe Artikel-URL; die Bild-Caption ist meist nur der
+    Spielername und daher kürzer. Wir behalten je URL-Pfad den LÄNGSTEN
+    Linktext (= die echte Überschrift) statt des ersten Treffers, und suchen
+    im Text davor nach dem zugehörigen Vorschaubild."""
     pat = re.compile(
         r'<a[^>]+href="(?:https?://(?:www\.)?ligainsider\.de)?(/[a-z0-9\-]+_\d+/[a-z0-9\-]+-\d+/)"[^>]*>(.*?)</a>',
         re.IGNORECASE | re.DOTALL)
-    seen, items = set(), []
-    for path, inner in pat.findall(html_text):
+    img_pat = re.compile(r'<img[^>]+src="([^"]+)"', re.IGNORECASE)
+
+    best = {}       # path -> (title, position im Dokument)
+    order = []      # Pfade in Reihenfolge ihres ersten Auftretens
+    for m in pat.finditer(html_text):
+        path, inner = m.group(1), m.group(2)
         title = re.sub(r"<[^>]+>", " ", inner)
+        title = html.unescape(title)
         title = re.sub(r"\s+", " ", title).strip()
-        if not title or len(title) < 8 or path in seen:
+        if not title or len(title) < 8:
             continue
-        seen.add(path)
-        items.append({"title": title, "url": "https://www.ligainsider.de" + path})
+        if path not in best:
+            order.append(path)
+            best[path] = (title, m.start())
+        elif len(title) > len(best[path][0]):
+            best[path] = (title, m.start())
+
+    items = []
+    for path in order:
+        title, pos = best[path]
+        window = html_text[max(0, pos - 2000):pos]
+        imgs = img_pat.findall(window)
+        entry = {"title": title, "url": "https://www.ligainsider.de" + path}
+        if imgs:
+            image = imgs[-1]
+            entry["image"] = "https:" + image if image.startswith("//") else image
+        items.append(entry)
         if len(items) >= limit:
             break
     return items
@@ -521,11 +569,25 @@ def testdata(today):
     ]
     news = [
         {"name": "ZDFheute", "home": "https://www.zdfheute.de", "note": None,
-         "items": [{"title": f"Beispiel-Schlagzeile {i}", "url": "https://www.zdfheute.de"} for i in range(1, 6)]},
+         "items": [
+             {"title": "Beispiel-Schlagzeile 1", "url": "https://www.zdfheute.de",
+              "image": "https://placehold.co/160x160?text=ZDF"},
+             {"title": "Beispiel-Schlagzeile 2", "url": "https://www.zdfheute.de",
+              "image": "https://placehold.co/160x160?text=ZDF"},
+             {"title": "Beispiel-Schlagzeile 3", "url": "https://www.zdfheute.de"},
+             {"title": "Beispiel-Schlagzeile 4", "url": "https://www.zdfheute.de"},
+             {"title": "Beispiel-Schlagzeile 5", "url": "https://www.zdfheute.de"},
+         ]},
         {"name": "kicker", "home": "https://www.kicker.de", "note": None,
          "items": [{"title": f"Fußball-Meldung {i}", "url": "https://www.kicker.de"} for i in range(1, 6)]},
-        {"name": "LigaInsider", "home": "https://www.ligainsider.de", "note": "Quelle derzeit nicht erreichbar",
-         "items": []},
+        {"name": "LigaInsider", "home": "https://www.ligainsider.de", "note": None,
+         "items": [
+             {"title": "Dompé mit schwerem Stand beim HSV",
+              "url": "https://www.ligainsider.de/jean-luc-dompe_12020/dompe-mit-schwerem-stand-beim-hsv-415247/",
+              "image": "https://cdn.ligainsider.de/images/player/team/minor/jean-luc-dompe-hsv-25-26-getty.jpg"},
+             {"title": "Transfergerüchte: Nächster Wechsel bahnt sich an",
+              "url": "https://www.ligainsider.de/beispiel-spieler_1/beispiel-artikel-2/"},
+         ]},
     ]
     releases = [
         {"date": (today - timedelta(days=4)).isoformat(), "name": "2026 TOPPS Finest Baseball Cards ⚾",
@@ -886,8 +948,15 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     # --- News
     news_panels = []
     for src in news:
-        lis = "".join(f'<li><a href="{esc(i["url"])}" target="_blank" rel="noopener">{esc(i["title"])}</a></li>'
-                      for i in src["items"])
+        li_parts = []
+        for i in src["items"]:
+            has_img = bool(i.get("image"))
+            img_html = f'<img src="{esc(i["image"])}" alt="" loading="lazy">' if has_img else ""
+            li_parts.append(
+                f'<li class="{"has-img" if has_img else ""}">'
+                f'<a href="{esc(i["url"])}" target="_blank" rel="noopener">'
+                f'{img_html}<span class="ntitle">{esc(i["title"])}</span></a></li>')
+        lis = "".join(li_parts)
         note = f'<div class="srcnote">{esc(src["note"])}</div>' if src.get("note") else ""
         body = f"<ul class='newslist'>{lis}</ul>" if lis else ""
         news_panels.append(f'''<div class="panel">
@@ -1067,8 +1136,11 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   ul.newslist {{ list-style: none; }}
   ul.newslist li {{ padding: 7px 0; border-bottom: 1px solid var(--hairline); font-size: 14px; line-height: 1.35; }}
   ul.newslist li:last-child {{ border-bottom: none; }}
-  ul.newslist a {{ text-decoration: none; }}
-  ul.newslist a:hover {{ text-decoration: underline; }}
+  ul.newslist a {{ text-decoration: none; display: flex; align-items: center; gap: 0; }}
+  ul.newslist a:hover .ntitle {{ text-decoration: underline; }}
+  ul.newslist li.has-img a {{ gap: 10px; }}
+  ul.newslist img {{ width: 52px; height: 52px; object-fit: cover; border-radius: 6px; flex: none; background: var(--hairline); }}
+  ul.newslist .ntitle {{ flex: 1; }}
   .srcnote {{ font-size: 12px; color: var(--muted); margin-top: 8px; }}
   footer {{ color: var(--muted); font-size: 12px; line-height: 1.5; border-top: 1px solid var(--hairline); padding-top: 12px; }}
   footer strong {{ color: var(--text-secondary); font-weight: 600; }}
