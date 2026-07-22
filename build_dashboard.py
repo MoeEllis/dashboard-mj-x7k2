@@ -46,6 +46,7 @@ TRELLO_SKIP_BOARDS = {"welcome board", "willkommens-board", "welcome-board"}
 # Podcast "Das Hobby" – nur Folgen mit offiziellem Transkript werden zusammengefasst.
 PODCAST_HOME = "https://dashobby.podigee.io"
 PODCAST_FEED_URL = f"{PODCAST_HOME}/feed/mp3"
+PODCAST_MODEL = os.environ.get("PODCAST_MODEL", "claude-haiku-4-5-20251001")
 PODCAST_MAX_NEW_PER_RUN = 12     # bremst den Erst-Backfill über mehrere Läufe ab, statt alles auf einmal
 PODCAST_STOP_AFTER_MISSES = 5    # so viele Folgen ohne Transkript hintereinander -> älter wird nicht mehr geprüft
 PODCAST_FEED_SCAN_LIMIT = 60     # wie viele der neuesten Feed-Einträge je Lauf überhaupt betrachtet werden
@@ -496,60 +497,47 @@ def _fetch_transcript_text(ep):
         return None
 
 
-_DE_STOPWORDS = {
-    "aber", "alle", "alles", "als", "also", "am", "an", "auch", "auf", "aus", "bei", "bin", "bis", "bist",
-    "da", "damit", "dann", "das", "dass", "dein", "deine", "dem", "den", "denn", "der", "des", "dich", "die",
-    "dies", "diese", "dieser", "dieses", "doch", "dort", "du", "durch", "ein", "eine", "einem", "einen",
-    "einer", "eines", "einfach", "er", "es", "euch", "euer", "eure", "für", "ganz", "gegen", "genau", "gerade",
-    "haben", "habt", "halt", "hat", "hatte", "hatten", "heute", "hier", "ich", "ihr", "ihre", "ihrem", "ihren",
-    "ihrer", "im", "immer", "in", "ist", "ja", "jetzt", "kann", "kannst", "können", "könnte", "mal", "man",
-    "mehr", "mein", "meine", "mich", "mir", "mit", "muss", "müssen", "na", "nach", "nein", "nicht", "noch",
-    "nur", "ob", "oder", "ohne", "quasi", "schon", "sehr", "sein", "seine", "seiner", "seit", "sich", "sie",
-    "sind", "so", "sollen", "sozusagen", "trotz", "über", "um", "und", "uns", "unser", "unsere", "unter",
-    "viel", "viele", "vom", "von", "vor", "während", "war", "waren", "warum", "was", "weil", "wenn", "wer",
-    "werde", "werden", "wie", "wieder", "will", "wir", "wird", "wo", "wurde", "wurden", "zu", "zum", "zur",
-    "zwischen", "irgendwie",
-}
-_WORD_RE = re.compile(r"[a-zäöüßA-ZÄÖÜ]{3,}")
+def _summarize_takeaways(title, description, transcript_text, api_key):
+    """Fasst eine Folge in 4-7 prägnante, deutsche Takeaway-Stichpunkte zusammen
+    (Claude API – echte Neuformulierung statt Satzausschnitten)."""
+    import requests
+    text = (transcript_text or description or "").strip()
+    if not text:
+        return None
+    text = text[:15000]
+    prompt = (
+        'Du bekommst das Transkript (oder ersatzweise nur die Kurzbeschreibung) einer Folge '
+        f'des deutschen Sammelkarten-Podcasts "Das Hobby".\n\nFolge: {title}\n\nText:\n{text}\n\n'
+        "Fasse die 4 bis 7 wichtigsten inhaltlichen Takeaways als kurze, prägnante Stichpunkte "
+        "auf Deutsch zusammen (je ein vollständiger, eigenständiger Satz, konkret, ohne "
+        "Füllwörter oder Gesprächspartikel). Gib NUR die Stichpunkte zurück, einen pro Zeile, "
+        "ohne Nummerierung, ohne Aufzählungszeichen, ohne Einleitung."
+    )
+    r = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={"x-api-key": api_key, "anthropic-version": "2023-06-01",
+                 "content-type": "application/json"},
+        json={"model": PODCAST_MODEL, "max_tokens": 500,
+              "messages": [{"role": "user", "content": prompt}]},
+        timeout=60)
+    r.raise_for_status()
+    data = r.json()
+    raw = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+    lines = [re.sub(r"^[\-•*\d\.\)\s]+", "", ln).strip() for ln in raw.splitlines()]
+    lines = [ln for ln in lines if ln]
+    return lines or None
 
 
-def _extract_takeaways(description, transcript_text, max_sentences=6):
-    """Wählt ohne externe API/Kosten die paar inhaltlich wichtigsten Sätze aus dem
-    Transkript aus (einfache Wortfrequenz-Gewichtung, klassische extraktive
-    Zusammenfassung). Reicht der Transkripttext nicht, wird die offizielle
-    Kurzbeschreibung als einziger Punkt verwendet."""
-    text = (transcript_text or "").strip()
-    if len(text) < 300:
-        return [description] if description else None
-
-    raw_sentences = re.split(r"(?<=[.!?])\s+", text)
-    sentences = [s.strip(" -–—") for s in raw_sentences]
-    sentences = [s for s in sentences if 30 <= len(s) <= 260]
-    if len(sentences) <= max_sentences:
-        return sentences or ([description] if description else None)
-
-    freq = {}
-    for s in sentences:
-        for w in _WORD_RE.findall(s.lower()):
-            if w not in _DE_STOPWORDS:
-                freq[w] = freq.get(w, 0) + 1
-
-    def score(s):
-        words = [w for w in _WORD_RE.findall(s.lower()) if w not in _DE_STOPWORDS]
-        return sum(freq.get(w, 0) for w in words) / len(words) if words else 0.0
-
-    ranked = sorted(range(len(sentences)), key=lambda i: score(sentences[i]), reverse=True)
-    top_idx = sorted(ranked[:max_sentences])   # Reihenfolge im Original wiederherstellen
-    return [sentences[i] for i in top_idx]
-
-
-def fetch_podcast():
-    """Holt neue Folgen von 'Das Hobby' mit offiziellem Transkript und zieht daraus
-    per einfacher Text-Analyse (Wortfrequenz, komplett ohne externe API und ohne
-    laufende Kosten) die wichtigsten Sätze als Takeaways. Bereits verarbeitete
-    Folgen werden dauerhaft in cache/podcast.json zwischengespeichert – pro Lauf
-    werden nur neue Folgen (max. PODCAST_MAX_NEW_PER_RUN) verarbeitet; ein
-    initialer Rückstand baut sich über mehrere automatische Läufe hinweg ab."""
+def fetch_podcast(api_key):
+    """Holt neue Folgen von 'Das Hobby' mit offiziellem Transkript und lässt die
+    Takeaways per Claude API zusammenfassen. Bereits verarbeitete Folgen werden
+    dauerhaft in cache/podcast.json zwischengespeichert – pro Lauf werden nur
+    neue Folgen (max. PODCAST_MAX_NEW_PER_RUN) verarbeitet, das genügt für die
+    laufende Aktualisierung; ein initialer Rückstand baut sich über mehrere
+    automatische Läufe hinweg ab. Kosten: siehe README-SETUP.md (grob unter
+    einem Cent pro neuer Folge, da jede Folge nur einmal verarbeitet wird)."""
+    if not api_key:
+        return [], "Noch nicht eingerichtet – Secret ANTHROPIC_API_KEY hinterlegen, dann erscheinen hier die Takeaways je Folge."
     cache = load_cache("podcast") or {}
     episodes_cache = cache.get("episodes", {})
     try:
@@ -574,18 +562,18 @@ def fetch_podcast():
                 misses += 1
             else:
                 try:
-                    takeaways = _extract_takeaways(ep["description"], transcript)
+                    takeaways = _summarize_takeaways(ep["title"], ep["description"], transcript, api_key)
                 except Exception as e:
-                    print(f"Hinweis: Auswertung für '{ep['title']}' fehlgeschlagen ({e}).")
+                    print(f"Hinweis: Zusammenfassung für '{ep['title']}' fehlgeschlagen ({e}).")
                     takeaways = None
                 processed += 1
                 if takeaways:
                     episodes_cache[key] = {"no_transcript": False, "title": ep["title"],
                                             "date": ep["date"], "url": ep["url"], "takeaways": takeaways}
                     misses = 0
-                    print(f"Podcast – neue Folge ausgewertet: {ep['title']}")
+                    print(f"Podcast – neue Folge zusammengefasst: {ep['title']}")
                 else:
-                    # Kein Ergebnis -> nicht cachen, nächster Lauf versucht es erneut
+                    # Kein Ergebnis (z.B. API-Fehler) -> nicht cachen, nächster Lauf versucht es erneut
                     misses = 0
         if misses >= PODCAST_STOP_AFTER_MISSES:
             break
@@ -1692,6 +1680,7 @@ def main():
         ics = (os.environ.get("ICS_URL") or "").strip()
         trello_key = (os.environ.get("TRELLO_KEY") or "").strip()
         trello_token = (os.environ.get("TRELLO_TOKEN") or "").strip()
+        anthropic_key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
         tasks, done_today = fetch_todoist(token) if token else ([], 0)
         if ics:
             y0, m0 = ym_add(today.year, today.month, -1)
@@ -1706,7 +1695,7 @@ def main():
         releases, releases_note = fetch_releases(today)
         trello, trello_note = fetch_trello(trello_key, trello_token, today)
         news = fetch_news()
-        podcast, podcast_note = fetch_podcast()
+        podcast, podcast_note = fetch_podcast(anthropic_key)
 
     plain = build_html(tasks, done_today, events, cardshows, news, refresh_token,
                        shows_note, releases, releases_note, trello, trello_note,
