@@ -475,16 +475,27 @@ def _fetch_transcript_text(ep):
         try:
             r = requests.get(ep["transcript_url"], timeout=30, headers=UA)
             if r.status_code == 200 and r.text.strip():
-                text = r.text
-                text = re.sub(r"^WEBVTT.*?\n\n", "", text, flags=re.DOTALL)
-                text = re.sub(r"\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[.,]\d{3}.*", "", text)
-                text = re.sub(r"^\d+$", "", text, flags=re.MULTILINE)
+                text = r.text.strip()
+                if text[:1] in "[{":
+                    try:
+                        data = json.loads(text)
+                        segments = data if isinstance(data, list) else (
+                            data.get("segments") or data.get("cues") or data.get("words") or [])
+                        parts = [seg.get("text", "").strip() for seg in segments
+                                 if isinstance(seg, dict) and seg.get("text")]
+                        if parts:
+                            text = " ".join(parts)
+                    except Exception:
+                        pass
+                else:
+                    text = re.sub(r"^WEBVTT.*?\n\n", "", text, flags=re.DOTALL)
+                    text = re.sub(r"\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[.,]\d{3}.*", "", text)
+                    text = re.sub(r"^\d+$", "", text, flags=re.MULTILINE)
                 text = re.sub(r"\s+", " ", text).strip()
                 if len(text) > 200:
                     return text
         except Exception:
             pass
-    # Fallback: die Podigee-Episodenseite veröffentlicht ein Transkript unter .../transcript
     try:
         r = requests.get(ep["url"].rstrip("/") + "/transcript", timeout=30, headers=UA)
         if r.status_code != 200:
