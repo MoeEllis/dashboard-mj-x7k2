@@ -537,11 +537,14 @@ def fetch_podcast(api_key):
     automatische Läufe hinweg ab. Kosten: siehe README-SETUP.md (grob unter
     einem Cent pro neuer Folge, da jede Folge nur einmal verarbeitet wird)."""
     if not api_key:
+        print("Hinweis: Secret ANTHROPIC_API_KEY ist leer/fehlt – Podcast-Abschnitt wird übersprungen.")
         return [], "Noch nicht eingerichtet – Secret ANTHROPIC_API_KEY hinterlegen, dann erscheinen hier die Takeaways je Folge."
+    print(f"Podcast: ANTHROPIC_API_KEY erkannt (Länge {len(api_key)} Zeichen, beginnt mit '{api_key[:7]}...').")
     cache = load_cache("podcast") or {}
     episodes_cache = cache.get("episodes", {})
     try:
         feed_eps = _podcast_episode_list()
+        print(f"Podcast-Feed: {len(feed_eps)} Einträge im RSS-Feed gefunden.")
     except Exception as e:
         print(f"Hinweis: Podcast-Feed nicht erreichbar ({e}) – nutze Zwischenspeicher.")
         feed_eps = []
@@ -557,6 +560,7 @@ def fetch_podcast(api_key):
                 break
             transcript = _fetch_transcript_text(ep)
             if not transcript:
+                print(f"Podcast – kein Transkript gefunden für: {ep['title']}")
                 episodes_cache[key] = {"no_transcript": True, "title": ep["title"], "date": ep["date"]}
                 processed += 1
                 misses += 1
@@ -582,6 +586,9 @@ def fetch_podcast(api_key):
     save_cache("podcast", cache)
     result = [v for v in episodes_cache.values() if not v.get("no_transcript") and v.get("takeaways")]
     result.sort(key=lambda e: e.get("date") or "", reverse=True)
+    n_no_transcript = sum(1 for v in episodes_cache.values() if v.get("no_transcript"))
+    print(f"Podcast: {len(episodes_cache)} Folge(n) insgesamt im Zwischenspeicher, "
+          f"davon {len(result)} mit Takeaways, {n_no_transcript} ohne Transkript.")
     note = None if result else "Noch keine Folge mit Transkript gefunden – der Erst-Abgleich läuft über mehrere automatische Aktualisierungen."
     return result, note
 
