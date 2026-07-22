@@ -20,6 +20,7 @@ damit ein zeitweiliger Ausfall einer Quelle den Bau nicht stoppt.
 import os, re, sys, json, base64, html
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
+from email.utils import parsedate_to_datetime
 
 TZ = ZoneInfo("Europe/Berlin")
 REPO = os.environ.get("GITHUB_REPOSITORY", "MoeEllis/dashboard-mj-x7k2")
@@ -42,6 +43,12 @@ MONTH_NUM = {"januar": 1, "februar": 2, "märz": 3, "maerz": 3, "april": 4, "mai
 UA = {"User-Agent": "Mozilla/5.0 (compatible; PersonalDashboard/1.0)"}
 # Trello legt für jeden neuen Account automatisch ein Demo-Board an – das blenden wir aus.
 TRELLO_SKIP_BOARDS = {"welcome board", "willkommens-board", "welcome-board"}
+# Podcast "Das Hobby" – nur Folgen mit offiziellem Transkript werden zusammengefasst.
+PODCAST_HOME = "https://dashobby.podigee.io"
+PODCAST_FEED_URL = f"{PODCAST_HOME}/feed/mp3"
+PODCAST_MAX_NEW_PER_RUN = 12     # bremst den Erst-Backfill über mehrere Läufe ab, statt alles auf einmal
+PODCAST_STOP_AFTER_MISSES = 5    # so viele Folgen ohne Transkript hintereinander -> älter wird nicht mehr geprüft
+PODCAST_FEED_SCAN_LIMIT = 60     # wie viele der neuesten Feed-Einträge je Lauf überhaupt betrachtet werden
 
 esc = html.escape
 
@@ -419,6 +426,178 @@ def fetch_trello(key, token, today):
         return [], "Trello nicht erreichbar – TRELLO_KEY/TRELLO_TOKEN prüfen."
 
 
+# --------------------------------------------------------------- Podcast ---
+def _strip_tags(raw):
+    """Grober HTML->Text-Konverter (Skripte/Styles raus, Tags raus, Entities aufgelöst)."""
+    text = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", raw, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _podcast_episode_list(limit=PODCAST_FEED_SCAN_LIMIT):
+    """Liste der neuesten Folgen (neueste zuerst) aus dem öffentlichen RSS-Feed."""
+    import requests
+    import xml.etree.ElementTree as ET
+    PODCAST_NS = "{https://podcastindex.org/namespace/1.0}"
+    r = requests.get(PODCAST_FEED_URL, timeout=30, headers=UA)
+    r.raise_for_status()
+    root = ET.fromstring(r.content)
+    out = []
+    for item in root.iter("item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        if not (title and link):
+            continue
+        guid = (item.findtext("guid") or link).strip()
+        pub = (item.findtext("pubDate") or "").strip()
+        try:
+            date_iso = parsedate_to_datetime(pub).astimezone(TZ).date().isoformat()
+        except Exception:
+            date_iso = None
+        desc_raw = item.findtext("description") or ""
+        transcript_url = None
+        el = item.find(f"{PODCAST_NS}transcript")
+        if el is not None and el.get("url"):
+            transcript_url = el.get("url")
+        out.append({"title": title, "url": link, "guid": guid, "date": date_iso,
+                     "description": _strip_tags(desc_raw), "transcript_url": transcript_url})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _fetch_transcript_text(ep):
+    """Versucht den vollen Transkript-Text einer Folge zu holen. None, falls keins existiert."""
+    import requests
+    if ep.get("transcript_url"):
+        try:
+            r = requests.get(ep["transcript_url"], timeout=30, headers=UA)
+            if r.status_code == 200 and r.text.strip():
+                text = r.text
+                text = re.sub(r"^WEBVTT.*?\n\n", "", text, flags=re.DOTALL)
+                text = re.sub(r"\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[.,]\d{3}.*", "", text)
+                text = re.sub(r"^\d+$", "", text, flags=re.MULTILINE)
+                text = re.sub(r"\s+", " ", text).strip()
+                if len(text) > 200:
+                    return text
+        except Exception:
+            pass
+    # Fallback: die Podigee-Episodenseite veröffentlicht ein Transkript unter .../transcript
+    try:
+        r = requests.get(ep["url"].rstrip("/") + "/transcript", timeout=30, headers=UA)
+        if r.status_code != 200:
+            return None
+        text = _strip_tags(r.text)
+        if len(text) < 300:
+            return None
+        return text
+    except Exception:
+        return None
+
+
+_DE_STOPWORDS = {
+    "aber", "alle", "alles", "als", "also", "am", "an", "auch", "auf", "aus", "bei", "bin", "bis", "bist",
+    "da", "damit", "dann", "das", "dass", "dein", "deine", "dem", "den", "denn", "der", "des", "dich", "die",
+    "dies", "diese", "dieser", "dieses", "doch", "dort", "du", "durch", "ein", "eine", "einem", "einen",
+    "einer", "eines", "einfach", "er", "es", "euch", "euer", "eure", "für", "ganz", "gegen", "genau", "gerade",
+    "haben", "habt", "halt", "hat", "hatte", "hatten", "heute", "hier", "ich", "ihr", "ihre", "ihrem", "ihren",
+    "ihrer", "im", "immer", "in", "ist", "ja", "jetzt", "kann", "kannst", "können", "könnte", "mal", "man",
+    "mehr", "mein", "meine", "mich", "mir", "mit", "muss", "müssen", "na", "nach", "nein", "nicht", "noch",
+    "nur", "ob", "oder", "ohne", "quasi", "schon", "sehr", "sein", "seine", "seiner", "seit", "sich", "sie",
+    "sind", "so", "sollen", "sozusagen", "trotz", "über", "um", "und", "uns", "unser", "unsere", "unter",
+    "viel", "viele", "vom", "von", "vor", "während", "war", "waren", "warum", "was", "weil", "wenn", "wer",
+    "werde", "werden", "wie", "wieder", "will", "wir", "wird", "wo", "wurde", "wurden", "zu", "zum", "zur",
+    "zwischen", "irgendwie",
+}
+_WORD_RE = re.compile(r"[a-zäöüßA-ZÄÖÜ]{3,}")
+
+
+def _extract_takeaways(description, transcript_text, max_sentences=6):
+    """Wählt ohne externe API/Kosten die paar inhaltlich wichtigsten Sätze aus dem
+    Transkript aus (einfache Wortfrequenz-Gewichtung, klassische extraktive
+    Zusammenfassung). Reicht der Transkripttext nicht, wird die offizielle
+    Kurzbeschreibung als einziger Punkt verwendet."""
+    text = (transcript_text or "").strip()
+    if len(text) < 300:
+        return [description] if description else None
+
+    raw_sentences = re.split(r"(?<=[.!?])\s+", text)
+    sentences = [s.strip(" -–—") for s in raw_sentences]
+    sentences = [s for s in sentences if 30 <= len(s) <= 260]
+    if len(sentences) <= max_sentences:
+        return sentences or ([description] if description else None)
+
+    freq = {}
+    for s in sentences:
+        for w in _WORD_RE.findall(s.lower()):
+            if w not in _DE_STOPWORDS:
+                freq[w] = freq.get(w, 0) + 1
+
+    def score(s):
+        words = [w for w in _WORD_RE.findall(s.lower()) if w not in _DE_STOPWORDS]
+        return sum(freq.get(w, 0) for w in words) / len(words) if words else 0.0
+
+    ranked = sorted(range(len(sentences)), key=lambda i: score(sentences[i]), reverse=True)
+    top_idx = sorted(ranked[:max_sentences])   # Reihenfolge im Original wiederherstellen
+    return [sentences[i] for i in top_idx]
+
+
+def fetch_podcast():
+    """Holt neue Folgen von 'Das Hobby' mit offiziellem Transkript und zieht daraus
+    per einfacher Text-Analyse (Wortfrequenz, komplett ohne externe API und ohne
+    laufende Kosten) die wichtigsten Sätze als Takeaways. Bereits verarbeitete
+    Folgen werden dauerhaft in cache/podcast.json zwischengespeichert – pro Lauf
+    werden nur neue Folgen (max. PODCAST_MAX_NEW_PER_RUN) verarbeitet; ein
+    initialer Rückstand baut sich über mehrere automatische Läufe hinweg ab."""
+    cache = load_cache("podcast") or {}
+    episodes_cache = cache.get("episodes", {})
+    try:
+        feed_eps = _podcast_episode_list()
+    except Exception as e:
+        print(f"Hinweis: Podcast-Feed nicht erreichbar ({e}) – nutze Zwischenspeicher.")
+        feed_eps = []
+
+    processed, misses = 0, 0
+    for ep in feed_eps:
+        key = ep["guid"]
+        cached = episodes_cache.get(key)
+        if cached is not None:
+            misses = misses + 1 if cached.get("no_transcript") else 0
+        else:
+            if processed >= PODCAST_MAX_NEW_PER_RUN:
+                break
+            transcript = _fetch_transcript_text(ep)
+            if not transcript:
+                episodes_cache[key] = {"no_transcript": True, "title": ep["title"], "date": ep["date"]}
+                processed += 1
+                misses += 1
+            else:
+                try:
+                    takeaways = _extract_takeaways(ep["description"], transcript)
+                except Exception as e:
+                    print(f"Hinweis: Auswertung für '{ep['title']}' fehlgeschlagen ({e}).")
+                    takeaways = None
+                processed += 1
+                if takeaways:
+                    episodes_cache[key] = {"no_transcript": False, "title": ep["title"],
+                                            "date": ep["date"], "url": ep["url"], "takeaways": takeaways}
+                    misses = 0
+                    print(f"Podcast – neue Folge ausgewertet: {ep['title']}")
+                else:
+                    # Kein Ergebnis -> nicht cachen, nächster Lauf versucht es erneut
+                    misses = 0
+        if misses >= PODCAST_STOP_AFTER_MISSES:
+            break
+
+    cache["episodes"] = episodes_cache
+    save_cache("podcast", cache)
+    result = [v for v in episodes_cache.values() if not v.get("no_transcript") and v.get("takeaways")]
+    result.sort(key=lambda e: e.get("date") or "", reverse=True)
+    note = None if result else "Noch keine Folge mit Transkript gefunden – der Erst-Abgleich läuft über mehrere automatische Aktualisierungen."
+    return result, note
+
+
 # ------------------------------------------------------------------- News ---
 _IMG_EXT_RE = re.compile(r"\.(?:jpe?g|png|webp|gif)(?:\?|$)", re.IGNORECASE)
 
@@ -621,7 +800,35 @@ def testdata(today):
             ]},
         ]},
     ]
-    return tasks, 2, events, shows, news, releases, trello
+    podcast = [
+        {"title": "#W30/26: Fanatics Fest war ein Statement | Der Hobby Talk", "date": today.isoformat(),
+         "url": "https://dashobby.podigee.io/291-w30-26-fanatics-fest-war-ein-statement-der-hobby-talk-die-sammelkarten-news-show",
+         "takeaways": [
+             "Fanatics Fest New York: rund 200.000 Besucher über vier Tage – neuer Maßstab für Event-Charakter im Hobby.",
+             "Shohei Ohtani: eine Bowman Super Refractor 1/1 erzielte 3,65 Mio. USD – neuer Rekord.",
+             "Victor Wembanyama: mehrere Karten in der Preisspanne von 130.000–230.000 USD.",
+             "Messi/Modrić/Ronaldo Triple-Autogrammkarte verkauft für 220.140 USD.",
+             "Messi/Lamine-Yamal-„Badewannen“-Foto wird als offizielle Topps-Karte umgesetzt.",
+             "Pokémon kündigt Set zum 30-jährigen Jubiläum an; Tech Trading verbessert Transparenz per Backlog-Tracking.",
+         ]},
+        {"title": "Warum manche das Hobby verlassen – und wie wir es besser machen können | Episode 181",
+         "date": (today - timedelta(days=5)).isoformat(),
+         "url": "https://dashobby.podigee.io/289-warum-manche-das-hobby-verlassen-und-wie-wir-es-besser-machen-konnen-episode-181",
+         "takeaways": [
+             "Häufigster Ausstiegsgrund: gefühlter Vertrauensverlust durch Fake-Karten und intransparente Grading-Wartezeiten.",
+             "Community-Tonalität (Kommentare, Whatnot-Auktionen) schreckt viele Neueinsteiger ab.",
+             "Empfehlung: kleine, lokale Cardshows als niedrigschwelliger Wiedereinstieg statt großer Online-Marktplätze.",
+             "Langfristige Bindung entsteht eher über Sammelthemen mit persönlichem Bezug als über reinen Investment-Fokus.",
+         ]},
+        {"title": "#W29/26: Topps kämpft gegen Flipper | Der Hobby Talk", "date": (today - timedelta(days=7)).isoformat(),
+         "url": "https://dashobby.podigee.io/290-w29-26-topps-kampft-gegen-flipper-der-hobby-talk-die-sammelkarten-news-show",
+         "takeaways": [
+             "Topps führt Kaufmengen-Limits ein, um gezielt gegen Reseller/Flipper vorzugehen.",
+             "Erste Community-Reaktionen gemischt: Zustimmung zur Fairness, Kritik an Umsetzung/Kontrolle.",
+             "Parallel: neue Restock-Ankündigungen sorgen erneut für kurzfristige Preisspitzen im Sekundärmarkt.",
+         ]},
+    ]
+    return tasks, 2, events, shows, news, releases, trello, podcast
 
 
 # ------------------------------------------------------------------ HTML ---
@@ -674,9 +881,10 @@ def fmt_show_date(s):
 
 def build_html(tasks, done_today, events, cardshows, news, refresh_token,
                shows_note=None, releases=None, releases_note=None,
-               trello=None, trello_note=None):
+               trello=None, trello_note=None, podcast=None, podcast_note=None):
     releases = releases or []
     trello = trello or []
+    podcast = podcast or []
     now = datetime.now(TZ)
     today = now.date()
     monday = today - timedelta(days=today.weekday())
@@ -964,6 +1172,32 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
       {body}{note or ("" if lis else '<div class="empty">Keine Meldungen verfügbar.</div>')}
     </div>''')
 
+    # --- Podcast ("Das Hobby")
+    podcast_cards = []
+    for i, ep in enumerate(podcast):
+        dstr = ""
+        if ep.get("date"):
+            d = date.fromisoformat(ep["date"])
+            dstr = f"{WD[d.weekday()]}, {d.day:02d}.{d.month:02d}.{d.year}"
+        tks = "".join(f"<li>{esc(t)}</li>" for t in ep.get("takeaways", []))
+        podcast_cards.append(f'''<div class="pcard" data-i="{i}">
+      <div class="pcard-date">{dstr}</div>
+      <h3><a href="{esc(ep.get("url",""))}" target="_blank" rel="noopener">{esc(ep["title"])}</a></h3>
+      <ul class="ptakeaways">{tks}</ul>
+    </div>''')
+    podcast_total = len(podcast_cards)
+    podcast_body = (
+        f'''<div class="pcarousel">
+      <button id="pprev" class="pnav" title="Vorherige Folge" {"disabled" if podcast_total < 2 else ""}>‹</button>
+      <div class="pviewport"><div class="ptrack">{"".join(podcast_cards)}</div></div>
+      <button id="pnext" class="pnav" title="Nächste Folge" {"disabled" if podcast_total < 2 else ""}>›</button>
+    </div>
+    <div class="pdots">{"".join(f'<span class="pdot{" active" if i == 0 else ""}" data-i="{i}"></span>' for i in range(podcast_total))}</div>
+    <div class="pcount">Folge <span id="pcur">1</span> / {podcast_total}</div>'''
+        if podcast_cards else
+        f'<div class="empty">{esc(podcast_note) if podcast_note else "Noch keine Folge verfügbar."}</div>'
+    )
+
     # --- Refresh-Knopf
     if refresh_token:
         refresh_html = '<button id="refreshbtn" class="refresh">⟳ Jetzt aktualisieren</button><span id="refreshmsg" class="refreshmsg"></span>'
@@ -1001,14 +1235,14 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   :root {{
     --surface-1: #fcfcfb; --page: #f9f9f7; --text-primary: #0b0b0b; --text-secondary: #52514e;
     --muted: #898781; --hairline: #e1e0d9; --border: rgba(11,11,11,0.10);
-    --privat: #1baf7a; --arbeit: #2a78d6; --studium: #4a3aa7; --trello: #eda100;
+    --privat: #1baf7a; --arbeit: #2a78d6; --studium: #4a3aa7; --trello: #eda100; --podcast: #008300;
     --good: #0ca30c; --good-text: #006300; --done-ink: #898781;
   }}
   @media (prefers-color-scheme: dark) {{
     :root {{
       --surface-1: #1a1a19; --page: #0d0d0d; --text-primary: #ffffff; --text-secondary: #c3c2b7;
       --muted: #898781; --hairline: #2c2c2a; --border: rgba(255,255,255,0.10);
-      --privat: #199e70; --arbeit: #3987e5; --studium: #9085e9; --trello: #c98500; --good-text: #0ca30c;
+      --privat: #199e70; --arbeit: #3987e5; --studium: #9085e9; --trello: #c98500; --podcast: #008300; --good-text: #0ca30c;
     }}
   }}
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -1142,6 +1376,26 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   ul.newslist img {{ width: 52px; height: 52px; object-fit: cover; border-radius: 6px; flex: none; background: var(--hairline); }}
   ul.newslist .ntitle {{ flex: 1; }}
   .srcnote {{ font-size: 12px; color: var(--muted); margin-top: 8px; }}
+  .pcarousel {{ display: flex; align-items: stretch; gap: 10px; }}
+  .pviewport {{ flex: 1; overflow: hidden; min-width: 0; }}
+  .ptrack {{ display: flex; transition: transform 0.3s ease; touch-action: pan-y; }}
+  .pcard {{ flex: 0 0 100%; min-width: 0; background: var(--surface-1); border: 1px solid var(--border);
+            border-radius: 12px; padding: 20px 22px; border-top: 3px solid var(--podcast); }}
+  .pcard-date {{ font-size: 12px; color: var(--muted); margin-bottom: 4px; }}
+  .pcard h3 {{ font-size: 16px; margin-bottom: 12px; line-height: 1.3; }}
+  .pcard h3 a {{ color: var(--text-primary); text-decoration: none; }}
+  .pcard h3 a:hover {{ text-decoration: underline; }}
+  ul.ptakeaways {{ list-style: none; }}
+  ul.ptakeaways li {{ position: relative; padding: 5px 0 5px 18px; font-size: 14px; line-height: 1.45; }}
+  ul.ptakeaways li::before {{ content: "•"; position: absolute; left: 2px; color: var(--podcast); font-weight: 700; }}
+  .pnav {{ flex: none; align-self: center; width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--border);
+           background: var(--surface-1); color: var(--text-primary); font-size: 18px; cursor: pointer; }}
+  .pnav:hover:not(:disabled) {{ background: var(--hairline); }}
+  .pnav:disabled {{ opacity: 0.35; cursor: default; }}
+  .pdots {{ display: flex; justify-content: center; gap: 6px; margin-top: 14px; }}
+  .pdot {{ width: 7px; height: 7px; border-radius: 50%; background: var(--hairline); cursor: pointer; }}
+  .pdot.active {{ background: var(--podcast); }}
+  .pcount {{ text-align: center; font-size: 12px; color: var(--muted); margin-top: 6px; }}
   footer {{ color: var(--muted); font-size: 12px; line-height: 1.5; border-top: 1px solid var(--hairline); padding-top: 12px; }}
   footer strong {{ color: var(--text-secondary); font-weight: 600; }}
 </style>
@@ -1164,6 +1418,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     <button data-view="view-shows">Cardshows</button>
     <button data-view="view-releases">Releases</button>
     <button data-view="view-news">News</button>
+    <button data-view="view-podcast">Podcast</button>
   </nav>
 
   <div id="view-today" class="view active">
@@ -1231,6 +1486,12 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     <div class="row3">{"".join(news_panels)}</div>
   </div>
 
+  <div id="view-podcast" class="view">
+    <h2 class="vtitle">Podcast · Das Hobby</h2>
+    <div class="srcline">Quelle: <a href="{PODCAST_HOME}" target="_blank" rel="noopener">dashobby.podigee.io</a> (offizielles Transkript je Folge) · Stand {stand} Uhr · Durchwischen oder Pfeile für weitere Folgen</div>
+    {podcast_body}
+  </div>
+
   <footer>
     <strong>Automatisch aktuell:</strong> Aufgaben pflegst du direkt in Todoist, Termine in Google Kalender.
     Das Dashboard aktualisiert sich alle 30 Minuten von selbst – oder sofort über den ⟳-Knopf oben rechts.
@@ -1287,7 +1548,37 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   document.querySelectorAll('#view-releases .mk').forEach(b => b.addEventListener('click', () => {{
     const v = b.textContent.trim();
     relF.maker = (relF.maker === v) ? '' : v; applyRel();
-  }}));{refresh_js}
+  }}));
+  // Podcast: Karussell (Pfeile, Punkte, Swipe)
+  (() => {{
+    const track = document.querySelector('#view-podcast .ptrack');
+    if (!track) return;
+    const cards = track.querySelectorAll('.pcard');
+    const dots = document.querySelectorAll('#view-podcast .pdot');
+    const cur = document.getElementById('pcur');
+    const prevBtn = document.getElementById('pprev'), nextBtn = document.getElementById('pnext');
+    let i = 0;
+    function show(idx) {{
+      i = Math.max(0, Math.min(cards.length - 1, idx));
+      track.style.transform = `translateX(-${{i * 100}}%)`;
+      dots.forEach((d, di) => d.classList.toggle('active', di === i));
+      if (cur) cur.textContent = i + 1;
+      if (prevBtn) prevBtn.disabled = i === 0;
+      if (nextBtn) nextBtn.disabled = i === cards.length - 1;
+    }}
+    prevBtn && prevBtn.addEventListener('click', () => show(i - 1));
+    nextBtn && nextBtn.addEventListener('click', () => show(i + 1));
+    dots.forEach(d => d.addEventListener('click', () => show(parseInt(d.dataset.i, 10))));
+    let touchX = null;
+    track.addEventListener('touchstart', e => {{ touchX = e.touches[0].clientX; }}, {{ passive: true }});
+    track.addEventListener('touchend', e => {{
+      if (touchX === null) return;
+      const dx = e.changedTouches[0].clientX - touchX;
+      if (Math.abs(dx) > 40) show(i + (dx < 0 ? 1 : -1));
+      touchX = null;
+    }}, {{ passive: true }});
+    show(0);
+  }})();{refresh_js}
 </script>
 </body>
 </html>'''
@@ -1393,9 +1684,9 @@ def main():
     now = datetime.now(TZ)
     today = now.date()
 
-    shows_note = releases_note = trello_note = None
+    shows_note = releases_note = trello_note = podcast_note = None
     if os.environ.get("DASH_TEST") == "1":
-        tasks, done_today, events, cardshows, news, releases, trello = testdata(today)
+        tasks, done_today, events, cardshows, news, releases, trello, podcast = testdata(today)
     else:
         token = (os.environ.get("TODOIST_TOKEN") or "").strip()
         ics = (os.environ.get("ICS_URL") or "").strip()
@@ -1415,16 +1706,18 @@ def main():
         releases, releases_note = fetch_releases(today)
         trello, trello_note = fetch_trello(trello_key, trello_token, today)
         news = fetch_news()
+        podcast, podcast_note = fetch_podcast()
 
     plain = build_html(tasks, done_today, events, cardshows, news, refresh_token,
-                       shows_note, releases, releases_note, trello, trello_note)
+                       shows_note, releases, releases_note, trello, trello_note,
+                       podcast, podcast_note)
     encrypted = encrypt_page(plain, password)
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(encrypted)
     trello_n = sum(len(l["cards"]) for b in trello for l in b["lists"])
     print(f"OK: index.html geschrieben ({len(encrypted)} Zeichen), {len(tasks)} Aufgaben, "
           f"{len(events)} Termine, {len(cardshows)} Cardshows, {len(releases)} Releases, "
-          f"{trello_n} Trello-Karten, Stand {now.strftime('%H:%M')} Uhr")
+          f"{trello_n} Trello-Karten, {len(podcast)} Podcast-Folgen, Stand {now.strftime('%H:%M')} Uhr")
 
 
 if __name__ == "__main__":
