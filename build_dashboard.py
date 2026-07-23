@@ -25,6 +25,7 @@ from email.utils import parsedate_to_datetime
 TZ = ZoneInfo("Europe/Berlin")
 REPO = os.environ.get("GITHUB_REPOSITORY", "MoeEllis/dashboard-mj-x7k2")
 AREAS = ["Privat", "Arbeit", "Studium"]
+MONTH_VIEW_HORIZON_MONTHS = 60  # Monatsansicht + Termine-Fetch: wie viele Monate in die Zukunft (5 Jahre)
 AREA_KEYS = {"privat": "Privat", "arbeit": "Arbeit", "studium": "Studium"}
 WD = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
 WD_LONG = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
@@ -172,12 +173,16 @@ def fetch_events(ics_urls, start, end):
     """Google-Kalender-Termine [start, end) inkl. aufgelöster Serientermine –
     über einen oder mehrere Kalender (ICS_URL + optional ICS_URLS) zusammengeführt.
     Eine einzelne nicht ladbare Kalender-Adresse bricht den Bau nicht ab (Warnung
-    statt Abbruch), nur wenn KEINE der Adressen ladbar ist, wird abgebrochen."""
+    statt Abbruch), nur wenn KEINE der Adressen ladbar ist, wird abgebrochen.
+    Jeder Termin bekommt "cal" = Index seiner Quelle (Reihenfolge ICS_URL, dann
+    ICS_URLS) für die Farbcodierung; zusätzlich wird cal_meta zurückgegeben
+    (Name je Kalender aus X-WR-CALNAME, Fallback "Kalender N")."""
     import requests, icalendar, recurring_ical_events
     if isinstance(ics_urls, str):
         ics_urls = [ics_urls]
     out, seen, any_ok, errors = [], set(), False, []
-    for ics_url in ics_urls:
+    cal_meta = []
+    for idx, ics_url in enumerate(ics_urls):
         try:
             resp = requests.get(ics_url, timeout=30, headers=UA)
             if resp.status_code != 200:
@@ -187,8 +192,11 @@ def fetch_events(ics_urls, start, end):
             short = ics_url[:70] + ("…" if len(ics_url) > 70 else "")
             errors.append(f"{short}: {e}")
             print(f"Hinweis: Kalender-Adresse nicht ladbar ({short}): {e}")
+            cal_meta.append({"idx": idx, "name": f"Kalender {idx + 1}", "ok": False})
             continue
         any_ok = True
+        name = str(cal.get("X-WR-CALNAME") or "").strip() or f"Kalender {idx + 1}"
+        cal_meta.append({"idx": idx, "name": name, "ok": True})
         for ev in recurring_ical_events.of(cal).between(start, end):
             dtstart = ev.get("DTSTART").dt
             dtend = ev.get("DTEND").dt if ev.get("DTEND") else None
@@ -217,14 +225,15 @@ def fetch_events(ics_urls, start, end):
             if key in seen:
                 continue
             seen.add(key)
-            out.append({"date": d.isoformat(), "end_date": end_d.isoformat(), "time": tm, "end_time": te, "title": title})
+            out.append({"date": d.isoformat(), "end_date": end_d.isoformat(), "time": tm, "end_time": te,
+                        "title": title, "cal": idx})
     if not any_ok:
         sys.exit("FEHLER: Keine der hinterlegten Kalender-Adressen (ICS_URL/ICS_URLS) konnte geladen werden – "
                   + " | ".join(errors) + ". Bitte in Google Kalender → Einstellungen → jeweiliger Kalender → "
                   "'Kalender integrieren' die 'Privatadresse im iCal-Format' (bzw. bei öffentlichen Kalendern "
                   "wie Feiertagen die 'Öffentliche Adresse im iCal-Format') neu kopieren.")
     out.sort(key=lambda e: (e["date"], e["time"]))
-    return out
+    return out, cal_meta
 
 
 # -------------------------------------------------------------- Cardshows ---
@@ -924,15 +933,24 @@ def testdata(today):
     ]
     events = [
         {"date": (today + timedelta(days=3)).isoformat(), "end_date": (today + timedelta(days=3)).isoformat(),
-         "time": "08:00", "end_time": "08:20", "title": "Physio ZAR"},
+         "time": "08:00", "end_time": "08:20", "title": "Physio ZAR", "cal": 0},
         {"date": (today + timedelta(days=5)).isoformat(), "end_date": (today + timedelta(days=6)).isoformat(),
-         "time": "", "end_time": "", "title": "[Sportmanagement] Grundlagen Sportbusiness · Vor Ort: Nürtingen"},
+         "time": "", "end_time": "", "title": "[Sportmanagement] Grundlagen Sportbusiness · Vor Ort: Nürtingen", "cal": 0},
         {"date": (today + timedelta(days=8)).isoformat(), "end_date": (today + timedelta(days=8)).isoformat(),
-         "time": "17:15", "end_time": "17:35", "title": "Physio ZAR"},
+         "time": "17:15", "end_time": "17:35", "title": "Physio ZAR", "cal": 0},
         {"date": (today + timedelta(days=45)).isoformat(), "end_date": (today + timedelta(days=47)).isoformat(),
-         "time": "", "end_time": "", "title": "Urlaub Start"},
+         "time": "", "end_time": "", "title": "Urlaub Start", "cal": 1},
         {"date": (today + timedelta(days=100)).isoformat(), "end_date": (today + timedelta(days=100)).isoformat(),
-         "time": "10:00", "end_time": "12:00", "title": "Zahnarzt"},
+         "time": "10:00", "end_time": "12:00", "title": "Zahnarzt", "cal": 1},
+        {"date": (today + timedelta(days=11)).isoformat(), "end_date": (today + timedelta(days=11)).isoformat(),
+         "time": "", "end_time": "", "title": "Tag der Deutschen Einheit", "cal": 2},
+        {"date": (today + timedelta(days=400)).isoformat(), "end_date": (today + timedelta(days=400)).isoformat(),
+         "time": "", "end_time": "", "title": "Beispiel-Termin in über einem Jahr", "cal": 0},
+    ]
+    cal_meta = [
+        {"idx": 0, "name": "Standard", "ok": True},
+        {"idx": 1, "name": "Privat", "ok": True},
+        {"idx": 2, "name": "Feiertage in Deutschland", "ok": True},
     ]
     shows = [
         {"start": (today + timedelta(days=2)).isoformat(), "end": (today + timedelta(days=5)).isoformat(),
@@ -1046,10 +1064,27 @@ def testdata(today):
                   "Kicker berichtet über anstehende Kaderentscheidungen vor dem Saisonstart."],
         "andere": ["ZDFheute: Beispielhafte Kernthemen des Tages aus den Testdaten."],
     }
-    return tasks, 2, events, shows, news, releases, trello, podcast, weather, day_focus, news_digest
+    events.sort(key=lambda e: (e["date"], e["time"]))
+    return tasks, 2, events, shows, news, releases, trello, podcast, weather, day_focus, news_digest, cal_meta
 
 
 # ------------------------------------------------------------------ HTML ---
+# Farbe je Kalenderquelle (Reihenfolge ICS_URL, dann ICS_URLS) – feste Zuordnung
+# per Index, damit eine Farbe stabil bleibt, auch wenn ein anderer Kalender mal
+# ausfällt oder eine neue Adresse dazukommt (Farbe hängt nicht von der Anzahl ab).
+CAL_PALETTE = ["#2a78d6", "#d64545", "#0f9d58", "#e0932a", "#1a9ab0", "#a34fd6", "#c2398a", "#6b7280"]
+
+
+def cal_color(idx):
+    return CAL_PALETTE[(idx or 0) % len(CAL_PALETTE)]
+
+
+def _hex_to_rgba(hexcolor, alpha):
+    h = hexcolor.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
 def _countdown_target(iso_date, time_str=None, end_of_day=False):
     """Baut ein zeitzonenbewusstes datetime-Ziel für eine Countdown-Kachel."""
     d = date.fromisoformat(iso_date)
@@ -1085,7 +1120,9 @@ def month_grid_html(y, m, ev_by_date, today):
         for e in ev_by_date.get(iso, []):
             past = " past" if iso < today.isoformat() else ""
             label = (e["time"] + " " if e["time"] else "") + ev_label(e)
-            chips += f'<div class="chip{past}" title="{esc(label)}">{esc(label)}</div>'
+            color = cal_color(e.get("cal"))
+            chips += (f'<div class="chip{past}" title="{esc(label)}" '
+                      f'style="background:{_hex_to_rgba(color, 0.14)};border-left-color:{color};">{esc(label)}</div>')
         cells.append(f'<div class="{cls}"><div class="num">{num}</div>{chips}</div>')
         d += timedelta(days=1)
     head = "".join(f"<div>{w}</div>" for w in WD)
@@ -1112,12 +1149,13 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
                shows_note=None, releases=None, releases_note=None,
                trello=None, trello_note=None, podcast=None, podcast_note=None,
                weather=None, weather_note=None, day_focus=None, day_focus_note=None,
-               news_digest=None):
+               news_digest=None, cal_meta=None):
     releases = releases or []
     trello = trello or []
     podcast = podcast or []
     weather = weather or []
     news_digest = news_digest or {}
+    cal_meta = cal_meta or []
     now = datetime.now(TZ)
     today = now.date()
     monday = today - timedelta(days=today.weekday())
@@ -1277,38 +1315,70 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     else:
         day_focus_html = '<div class="empty">Fokus wird beim nächsten automatischen Lauf berechnet.</div>'
 
+    def _ev_dot(e):
+        return f'<span class="d" style="background:{cal_color(e.get("cal"))}"></span>'
+
     if todays_ev:
         today_panel = "".join(
-            f'<div class="event"><span class="time">{e["time"]}–{e["end_time"]}</span><span>{esc(ev_label(e))}</span></div>'
+            f'<div class="event">{_ev_dot(e)}<span class="time">{e["time"]}–{e["end_time"]}</span><span>{esc(ev_label(e))}</span></div>'
             if e["time"] else
-            f'<div class="event"><span class="time">ganztägig</span><span>{esc(ev_label(e))}</span></div>'
+            f'<div class="event">{_ev_dot(e)}<span class="time">ganztägig</span><span>{esc(ev_label(e))}</span></div>'
             for e in todays_ev)
     else:
         today_panel = (f'<div class="empty"><span class="big">Keine Termine heute.</span><br>'
                        f'Nächster Termin: <strong style="color:var(--text-secondary)">{next_ev_title}</strong> ({next_ev_sub}).</div>')
 
-    # --- Woche
-    day_cards = []
-    for d in week_days:
-        iso = d.isoformat()
-        cls = "day today" if d == today else "day"
-        parts = [f'<h3>{WD[d.weekday()]} <span>{d.day:02d}.{d.month:02d}.{" · heute" if d == today else ""}</span></h3>']
-        for e in ev_by_date.get(iso, []):
-            tstr = f'<span class="t">{e["time"]}–{e["end_time"]}</span> · ' if e["time"] else ""
-            parts.append(f'<div class="ev">{tstr}{esc(ev_label(e))}</div>')
-        for t in task_by_date.get(iso, []):
-            parts.append(f'<div class="due"><span class="d" style="background:var(--{area_var[t["area"]]})"></span>{esc(t["content"])}</div>')
-        day_cards.append(f'<div class="{cls}">{"".join(parts)}</div>')
+    # --- Kalender-Legende (echte Namen + Farben je hinterlegter Kalender-Adresse)
+    cal_legend = "".join(
+        f'<span><span class="d" style="background:{cal_color(cm["idx"])}"></span>{esc(cm["name"])}</span>'
+        for cm in cal_meta if cm.get("ok"))
+    if not cal_legend:
+        cal_legend = f'<span><span class="d" style="background:{cal_color(0)}"></span>Termin (Kalender)</span>'
 
-    # --- Monat: 14 Monate (Vormonat bis +12) mit Dropdown und Pfeilen
-    month_list = [ym_add(today.year, today.month, k) for k in range(-1, 13)]
-    options, month_wraps = [], []
+    # --- Woche: mehrere Wochen (−8 bis +52) navigierbar (Pfeile + "Diese Woche")
+    week_wraps = []
+    for k in range(-8, 53):
+        wk_monday = monday + timedelta(weeks=k)
+        wk_days = [wk_monday + timedelta(days=i) for i in range(7)]
+        cards = []
+        for d in wk_days:
+            iso = d.isoformat()
+            cls = "day today" if d == today else "day"
+            parts = [f'<h3>{WD[d.weekday()]} <span>{d.day:02d}.{d.month:02d}.{" · heute" if d == today else ""}</span></h3>']
+            for e in ev_by_date.get(iso, []):
+                tstr = f'<span class="t">{e["time"]}–{e["end_time"]}</span> · ' if e["time"] else ""
+                color = cal_color(e.get("cal"))
+                parts.append(f'<div class="ev" style="background:{_hex_to_rgba(color, 0.12)};border-left-color:{color};">'
+                             f'{tstr}{esc(ev_label(e))}</div>')
+            for t in task_by_date.get(iso, []):
+                parts.append(f'<div class="due"><span class="d" style="background:var(--{area_var[t["area"]]})"></span>{esc(t["content"])}</div>')
+            cards.append(f'<div class="{cls}">{"".join(parts)}</div>')
+        wk_sun = wk_days[6]
+        wk_kw = wk_monday.isocalendar()[1]
+        wk_label = f"{wk_monday.day:02d}.{wk_monday.month:02d}.–{wk_sun.day:02d}.{wk_sun.month:02d}. · KW {wk_kw}"
+        active = " active" if k == 0 else ""
+        week_wraps.append(f'<div class="wkwrap{active}" data-wk="{k}" data-label="{esc(wk_label)}">'
+                          f'<div class="week-grid">{"".join(cards)}</div></div>')
+
+    # --- Monat: Vormonat bis +5 Jahre, zweistufig wählbar (erst Jahr, dann Monat)
+    month_list = [ym_add(today.year, today.month, k) for k in range(-1, MONTH_VIEW_HORIZON_MONTHS + 1)]
+    months_by_year = {}
+    for (y, m) in month_list:
+        months_by_year.setdefault(y, []).append(m)
+    year_options = "".join(
+        f'<option value="{y}"{" selected" if y == today.year else ""}>{y}</option>'
+        for y in sorted(months_by_year))
+    init_month_options = "".join(
+        f'<option value="{m}"{" selected" if m == today.month else ""}>{MONTHS[m-1]}</option>'
+        for m in months_by_year[today.year])
+    month_wraps = []
     for (y, m) in month_list:
         key = f"{y}-{m:02d}"
-        sel = " selected" if (y, m) == (today.year, today.month) else ""
-        options.append(f'<option value="{key}"{sel}>{MONTHS[m-1]} {y}</option>')
         active = " active" if (y, m) == (today.year, today.month) else ""
         month_wraps.append(f'<div class="mwrap{active}" data-ym="{key}">{month_grid_html(y, m, ev_by_date, today)}</div>')
+    months_by_year_json = json.dumps(months_by_year)
+    month_names_json = json.dumps(MONTHS)
+    month_list_json = json.dumps([f"{y}-{m:02d}" for (y, m) in month_list])
 
     # --- Jahr: alle Termine der nächsten 12 Monate, nach Monat gruppiert
     horizon = ym_add(today.year, today.month, 12)
@@ -1330,7 +1400,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
         else:
             dstr = f"{d.day:02d}.{d.month:02d}.–{d_end.day:02d}.{d_end.month:02d}."
         year_groups.append(
-            f'<div class="event"><span class="time">{dstr} · {tstr}</span>'
+            f'<div class="event">{_ev_dot(e)}<span class="time">{dstr} · {tstr}</span>'
             f'<span>{esc(e["title"])}</span></div>')
     year_html = "".join(year_groups) if year_groups else \
         '<div class="empty">Keine Termine in den nächsten 12 Monaten.</div>'
@@ -1608,6 +1678,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   .event {{ display: flex; gap: 12px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--hairline); font-size: 14px; }}
   .event:last-child {{ border-bottom: none; }}
   .event .time {{ color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 150px; }}
+  .event .d {{ width: 8px; height: 8px; border-radius: 3px; flex: 0 0 8px; align-self: center; }}
   .empty {{ color: var(--muted); font-size: 14px; padding: 8px 0; }}
   .empty .big {{ font-size: 15px; color: var(--text-secondary); }}
   .week-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 20px; }}
@@ -1626,6 +1697,12 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   .mnav button {{ padding: 6px 14px; font-size: 15px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary); cursor: pointer; }}
   .mnav select {{ padding: 7px 10px; font-size: 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); }}
   .mwrap {{ display: none; }} .mwrap.active {{ display: block; }}
+  .wknav {{ display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }}
+  .wknav button {{ padding: 6px 14px; font-size: 15px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary); cursor: pointer; }}
+  .wknav button:disabled {{ opacity: .35; cursor: default; }}
+  .wlabel {{ font-size: 14px; font-weight: 650; min-width: 200px; }}
+  .wtoday-btn {{ margin-left: auto; font-size: 13px !important; padding: 6px 14px; }}
+  .wkwrap {{ display: none; }} .wkwrap.active {{ display: block; }}
   .month-head {{ display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; font-size: 12px; color: var(--muted); margin-bottom: 6px; text-align: center; }}
   .month-grid {{ display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; margin-bottom: 20px; }}
   .mday {{ background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; min-height: 72px; padding: 6px; font-size: 12px; min-width: 0; overflow: hidden; }}
@@ -1771,10 +1848,16 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   </div>
 
   <div id="view-week" class="view">
-    <h2 class="vtitle">Woche im Überblick · {monday_iso} (KW {kw})</h2>
-    <div class="week-grid">{"".join(day_cards)}</div>
+    <h2 class="vtitle">Woche im Überblick</h2>
+    <div class="wknav">
+      <button id="wprev" title="Vorherige Woche">‹</button>
+      <span id="wlabel" class="wlabel">{monday.day:02d}.{monday.month:02d}.–{week_days[6].day:02d}.{week_days[6].month:02d}. · KW {kw}</span>
+      <button id="wnext" title="Nächste Woche">›</button>
+      <button id="wtoday" class="wtoday-btn">Diese Woche</button>
+    </div>
+    <div class="week-grid-wrap">{"".join(week_wraps)}</div>
     <div class="legend">
-      <span><span class="d" style="background:var(--arbeit)"></span>Termin (Kalender)</span>
+      {cal_legend}
       <span><span class="d" style="background:var(--privat)"></span>Aufgabe Privat</span>
       <span><span class="d" style="background:var(--arbeit)"></span>Aufgabe Arbeit</span>
       <span><span class="d" style="background:var(--studium)"></span>Aufgabe Studium</span>
@@ -1784,7 +1867,8 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   <div id="view-month" class="view">
     <div class="mnav">
       <button id="mprev" title="Vorheriger Monat">‹</button>
-      <select id="msel">{"".join(options)}</select>
+      <select id="ysel">{year_options}</select>
+      <select id="msel">{init_month_options}</select>
       <button id="mnext" title="Nächster Monat">›</button>
     </div>
     {"".join(month_wraps)}
@@ -1792,6 +1876,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
 
   <div id="view-year" class="view">
     <h2 class="vtitle">Alle Termine · nächste 12 Monate</h2>
+    <div class="legend">{cal_legend}</div>
     {year_html}
   </div>
 
@@ -1838,18 +1923,66 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
       document.getElementById(btn.dataset.view).classList.add('active');
     }});
   }});
+  // Monat: zweistufig (erst Jahr, dann Monat), Bereich Vormonat bis +5 Jahre
+  const MONTHS_BY_YEAR = {months_by_year_json};
+  const MONTH_NAMES = {month_names_json};
+  const MONTH_LIST = {month_list_json};
+  const ysel = document.getElementById('ysel');
   const msel = document.getElementById('msel');
+  let mIdx = MONTH_LIST.indexOf(`${{ysel.value}}-${{String(msel.value).padStart(2, '0')}}`);
+  function populateMonths(year, preferMonth) {{
+    const months = MONTHS_BY_YEAR[year] || [];
+    msel.innerHTML = months.map(m => `<option value="${{m}}">${{MONTH_NAMES[m - 1]}}</option>`).join('');
+    msel.value = months.includes(preferMonth) ? preferMonth : months[0];
+  }}
   function showMonth(key) {{
     document.querySelectorAll('.mwrap').forEach(w => w.classList.toggle('active', w.dataset.ym === key));
-    msel.value = key;
   }}
-  msel.addEventListener('change', () => showMonth(msel.value));
-  document.getElementById('mprev').addEventListener('click', () => {{
-    if (msel.selectedIndex > 0) {{ msel.selectedIndex--; showMonth(msel.value); }}
+  function currentKey() {{
+    return `${{ysel.value}}-${{String(msel.value).padStart(2, '0')}}`;
+  }}
+  function gotoIdx(idx) {{
+    idx = Math.max(0, Math.min(MONTH_LIST.length - 1, idx));
+    mIdx = idx;
+    const [y, m] = MONTH_LIST[idx].split('-').map(Number);
+    ysel.value = y;
+    populateMonths(y, m);
+    showMonth(MONTH_LIST[idx]);
+  }}
+  ysel.addEventListener('change', () => {{
+    populateMonths(parseInt(ysel.value, 10), parseInt(msel.value, 10));
+    mIdx = MONTH_LIST.indexOf(currentKey());
+    showMonth(currentKey());
   }});
-  document.getElementById('mnext').addEventListener('click', () => {{
-    if (msel.selectedIndex < msel.options.length - 1) {{ msel.selectedIndex++; showMonth(msel.value); }}
+  msel.addEventListener('change', () => {{
+    mIdx = MONTH_LIST.indexOf(currentKey());
+    showMonth(currentKey());
   }});
+  document.getElementById('mprev').addEventListener('click', () => gotoIdx(mIdx - 1));
+  document.getElementById('mnext').addEventListener('click', () => gotoIdx(mIdx + 1));
+  // Woche: mehrere Wochen navigierbar (Pfeile + "Diese Woche")
+  (() => {{
+    const wraps = Array.from(document.querySelectorAll('#view-week .wkwrap'));
+    if (!wraps.length) return;
+    let wi = wraps.findIndex(w => w.classList.contains('active'));
+    if (wi < 0) wi = 0;
+    const label = document.getElementById('wlabel');
+    const prevBtn = document.getElementById('wprev'), nextBtn = document.getElementById('wnext');
+    const todayIdx = wraps.findIndex(w => w.dataset.wk === '0');
+    function showWeek(idx) {{
+      idx = Math.max(0, Math.min(wraps.length - 1, idx));
+      wraps.forEach((w, i) => w.classList.toggle('active', i === idx));
+      wi = idx;
+      if (label) label.textContent = wraps[wi].dataset.label;
+      if (prevBtn) prevBtn.disabled = wi === 0;
+      if (nextBtn) nextBtn.disabled = wi === wraps.length - 1;
+    }}
+    prevBtn && prevBtn.addEventListener('click', () => showWeek(wi - 1));
+    nextBtn && nextBtn.addEventListener('click', () => showWeek(wi + 1));
+    const todayBtn = document.getElementById('wtoday');
+    todayBtn && todayBtn.addEventListener('click', () => showWeek(todayIdx));
+    showWeek(wi);
+  }})();
   // Cardshows: Monats-Chips
   document.querySelectorAll('#view-shows .fchip').forEach(c => c.addEventListener('click', () => {{
     document.querySelectorAll('#view-shows .fchip').forEach(x => x.classList.toggle('active', x === c));
@@ -2037,7 +2170,7 @@ def main():
     shows_note = releases_note = trello_note = podcast_note = weather_note = day_focus_note = None
     if os.environ.get("DASH_TEST") == "1":
         (tasks, done_today, events, cardshows, news, releases, trello, podcast,
-         weather, day_focus, news_digest) = testdata(today)
+         weather, day_focus, news_digest, cal_meta) = testdata(today)
     else:
         token = (os.environ.get("TODOIST_TOKEN") or "").strip()
         # ICS_URL: einzelner Kalender (Bestand). ICS_URLS: beliebig viele weitere,
@@ -2071,13 +2204,13 @@ def main():
         tasks, done_today = fetch_todoist(token) if token else ([], 0)
         if ics_list:
             y0, m0 = ym_add(today.year, today.month, -1)
-            y1, m1 = ym_add(today.year, today.month, 13)
+            y1, m1 = ym_add(today.year, today.month, MONTH_VIEW_HORIZON_MONTHS + 1)
             start = datetime.combine(date(y0, m0, 1) - timedelta(days=7), datetime.min.time(), TZ)
             end = datetime.combine(date(y1, m1, 1) + timedelta(days=7), datetime.min.time(), TZ)
-            events = fetch_events(ics_list, start, end)
+            events, cal_meta = fetch_events(ics_list, start, end)
             print(f"Kalender: {len(events)} Termine geladen ({len(ics_list)} Kalender-Adresse(n))")
         else:
-            events = []
+            events, cal_meta = [], []
         cardshows, shows_note = fetch_cardshows(today)
         releases, releases_note = fetch_releases(today)
         trello, trello_note = fetch_trello(trello_key, trello_token, today)
@@ -2090,7 +2223,7 @@ def main():
     plain = build_html(tasks, done_today, events, cardshows, news, refresh_token,
                        shows_note, releases, releases_note, trello, trello_note,
                        podcast, podcast_note, weather, weather_note,
-                       day_focus, day_focus_note, news_digest)
+                       day_focus, day_focus_note, news_digest, cal_meta)
     encrypted = encrypt_page(plain, password)
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(encrypted)

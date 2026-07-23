@@ -140,6 +140,22 @@ Listen, die auch tatsächlich Karten enthalten, damit es übersichtlich bleibt.
   Termin, zur nächsten fälligen Aufgabe und zur nächsten Cardshow in
   Deutschland – reine Berechnung aus den ohnehin geladenen Daten, **keine
   zusätzlichen Kosten**.
+- **Kalender-Farben:** Jeder Kalender (Standard aus `ICS_URL`, plus alle
+  weiteren aus `ICS_URLS`) bekommt automatisch eine eigene feste Farbe –
+  sichtbar als kleiner Punkt vor jedem Termin (Heute, Jahr) bzw. als
+  eingefärbte Kachel (Woche, Monat). Eine Legende mit Kalendernamen und
+  Farbe steht über den Ansichten „Woche", „Monat" und „Jahr". Die
+  Zuordnung Kalender → Farbe bleibt stabil, auch wenn später ein weiterer
+  Kalender dazukommt oder einer kurzzeitig nicht erreichbar ist.
+- **Woche – vor/zurück blättern:** Im Reiter „Woche" mit den Pfeilen links
+  und rechts der Wochenanzeige beliebig weit in vergangene oder zukünftige
+  Wochen blättern; „Diese Woche" springt jederzeit zur aktuellen Woche
+  zurück.
+- **Monat – 5 Jahre im Überblick:** Im Reiter „Monat" zuerst das Jahr,
+  dann den Monat auswählen (statt eines einzigen langen Dropdowns) – so
+  bleiben auch die nächsten 5 Jahre übersichtlich erreichbar. Die
+  Pfeile links/rechts blättern monatsweise weiter, auch über Jahresgrenzen
+  hinweg.
 - **Fehlersuche:** Wenn die Seite nicht aktualisiert, im Reiter **Actions**
   den letzten Lauf anklicken – die Fehlermeldung dort sagt meist direkt,
   welches Secret fehlt oder falsch ist. Einfach Claude zeigen.
