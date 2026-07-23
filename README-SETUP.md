@@ -31,7 +31,8 @@ Secrets anlegen (Name exakt so schreiben) – die ersten drei sind Pflicht, der 
 |---|---|---|
 | `DASH_PASSWORD` | `Orbit-Falke-10%` | Dein Dashboard-Passwort (unverändert) |
 | `TODOIST_TOKEN` | dein API-Token | Todoist → Einstellungen → **Integrationen** → Reiter **Entwickler** → API-Token kopieren |
-| `ICS_URL` | private iCal-Adresse | Google Kalender im Browser → Zahnrad → **Einstellungen** → links unter „Einstellungen für meine Kalender" deinen Kalender anklicken → Abschnitt **„Kalender integrieren"** → **„Privatadresse im iCal-Format"** kopieren |
+| `ICS_URL` | private iCal-Adresse (dein Hauptkalender) | Google Kalender im Browser → Zahnrad → **Einstellungen** → links unter „Einstellungen für meine Kalender" deinen Kalender anklicken → Abschnitt **„Kalender integrieren"** → **„Privatadresse im iCal-Format"** kopieren |
+| `ICS_URLS` | *(optional)* weitere iCal-Adressen, je eine pro Zeile (oder durch Komma getrennt) | Für zusätzliche Kalender wie „Privat" oder „Feiertage in Deutschland" – siehe „Mehrere Kalender" unten |
 | `REFRESH_TOKEN` | *(optional)* Feintoken | Nur für den ⟳-Knopf direkt in der Seite, siehe unten |
 | `TRELLO_KEY` | *(optional)* dein Trello-API-Key | [trello.com/app-key](https://trello.com/app-key) (eingeloggt öffnen) → oben den **Key** kopieren |
 | `TRELLO_TOKEN` | *(optional)* dein Trello-Token | Auf derselben Seite unten auf **„Token"** klicken → Zugriff erlauben → den angezeigten Token kopieren |
@@ -71,6 +72,21 @@ Listen, die auch tatsächlich Karten enthalten, damit es übersichtlich bleibt.
   Unterprojekte darunter (Fächer, Arbeitsprojekte …) sind beliebig und
   erscheinen als graue Zusatzzeile bei der Aufgabe. Priorität 1 (rot) in
   Todoist wird als „hoch" markiert.
+- **Mehrere Kalender (z. B. „Privat", „Feiertage in Deutschland"):** Standardmäßig
+  wird nur der eine in `ICS_URL` hinterlegte Kalender geladen. Um weitere
+  Kalender zusätzlich anzuzeigen, für jeden gewünschten weiteren Kalender in
+  Google Kalender → Einstellungen → den jeweiligen Kalender anklicken →
+  „Kalender integrieren" die passende iCal-Adresse kopieren (bei eigenen,
+  privaten Kalendern die „Privatadresse im iCal-Format"; bei abonnierten
+  öffentlichen Kalendern wie „Feiertage in Deutschland" die „Öffentliche
+  Adresse im iCal-Format"). Alle diese zusätzlichen Adressen kommen zusammen
+  in das Secret `ICS_URLS` – eine pro Zeile (oder durch Komma getrennt). Das
+  Dashboard führt dann alle Kalender zu einer gemeinsamen Terminliste zusammen.
+  Ist eine der Adressen mal kurzzeitig nicht erreichbar, fällt nur dieser eine
+  Kalender für den Lauf aus (Hinweis im Actions-Log), die übrigen werden
+  trotzdem geladen. Adressen, die mit `webcal://` beginnen (typisch bei
+  abonnierten Apple/iCloud-Kalendern), werden automatisch erkannt und
+  funktionieren genauso wie `https://`-Adressen – keine manuelle Anpassung nötig.
 - **Sicherheit:** Alle Zugangsdaten liegen ausschließlich in GitHubs
   Secrets-Tresor (für niemanden einsehbar, auch nicht im öffentlichen Repo).
   Veröffentlicht wird immer nur die verschlüsselte Seite.

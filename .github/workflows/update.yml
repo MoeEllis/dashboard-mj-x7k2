@@ -33,6 +33,7 @@ jobs:
       - name: Dashboard bauen und verschlüsseln
         env:
           ICS_URL: ${{ secrets.ICS_URL }}
+          ICS_URLS: ${{ secrets.ICS_URLS }}
           TODOIST_TOKEN: ${{ secrets.TODOIST_TOKEN }}
           DASH_PASSWORD: ${{ secrets.DASH_PASSWORD }}
           REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}

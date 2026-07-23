@@ -5,7 +5,7 @@ Baut Moritz' persönliches Dashboard und verschlüsselt es zu index.html.
 
 Datenquellen:
   - Todoist Unified API v1 (Aufgaben, Projekte)        [Secret: TODOIST_TOKEN]
-  - Google Kalender, private iCal-Adresse (Termine)    [Secret: ICS_URL]
+  - Google Kalender, private iCal-Adresse(n) (Termine) [Secret: ICS_URL (+ optional ICS_URLS für weitere Kalender)]
   - gradedmoments.de/cardshows (Cardshow-Termine)      [öffentlich]
   - News: ZDFheute, kicker, LigaInsider                [öffentlich]
 Verschlüsselung:
@@ -168,43 +168,61 @@ def map_todoist(projects, raw_tasks):
 
 
 # ------------------------------------------------------------------- iCal ---
-def fetch_events(ics_url, start, end):
-    """Google-Kalender-Termine [start, end) inkl. aufgelöster Serientermine."""
+def fetch_events(ics_urls, start, end):
+    """Google-Kalender-Termine [start, end) inkl. aufgelöster Serientermine –
+    über einen oder mehrere Kalender (ICS_URL + optional ICS_URLS) zusammengeführt.
+    Eine einzelne nicht ladbare Kalender-Adresse bricht den Bau nicht ab (Warnung
+    statt Abbruch), nur wenn KEINE der Adressen ladbar ist, wird abgebrochen."""
     import requests, icalendar, recurring_ical_events
-    resp = requests.get(ics_url, timeout=30, headers=UA)
-    if resp.status_code != 200:
-        sys.exit(f"FEHLER: Kalender-Adresse (ICS_URL) antwortet mit HTTP {resp.status_code}. "
-                 "Bitte in Google Kalender → Einstellungen → dein Kalender → 'Kalender integrieren' "
-                 "die 'Privatadresse im iCal-Format' kopieren (endet auf basic.ics).")
-    try:
-        cal = icalendar.Calendar.from_ical(resp.content)
-    except Exception:
-        sys.exit("FEHLER: Die ICS_URL liefert keinen gültigen Kalender. Bitte prüfen, dass die "
-                 "'Privatadresse im iCal-Format' hinterlegt ist.")
-    out = []
-    for ev in recurring_ical_events.of(cal).between(start, end):
-        dtstart = ev.get("DTSTART").dt
-        dtend = ev.get("DTEND").dt if ev.get("DTEND") else None
-        title = str(ev.get("SUMMARY", "Termin"))
-        if isinstance(dtstart, datetime):
-            local = dtstart.astimezone(TZ)
-            d, tm = local.date(), local.strftime("%H:%M")
-            if isinstance(dtend, datetime):
-                end_local = dtend.astimezone(TZ)
-                te, end_d = end_local.strftime("%H:%M"), end_local.date()
-                # Endet exakt um Mitternacht: gehört noch zum Vortag (sonst "Phantom-Tag" ohne Inhalt)
-                if end_d > d and end_local.time() == datetime.min.time():
-                    end_d -= timedelta(days=1)
+    if isinstance(ics_urls, str):
+        ics_urls = [ics_urls]
+    out, seen, any_ok, errors = [], set(), False, []
+    for ics_url in ics_urls:
+        try:
+            resp = requests.get(ics_url, timeout=30, headers=UA)
+            if resp.status_code != 200:
+                raise ValueError(f"HTTP {resp.status_code}")
+            cal = icalendar.Calendar.from_ical(resp.content)
+        except Exception as e:
+            short = ics_url[:70] + ("…" if len(ics_url) > 70 else "")
+            errors.append(f"{short}: {e}")
+            print(f"Hinweis: Kalender-Adresse nicht ladbar ({short}): {e}")
+            continue
+        any_ok = True
+        for ev in recurring_ical_events.of(cal).between(start, end):
+            dtstart = ev.get("DTSTART").dt
+            dtend = ev.get("DTEND").dt if ev.get("DTEND") else None
+            title = str(ev.get("SUMMARY", "Termin"))
+            uid = str(ev.get("UID", ""))
+            if isinstance(dtstart, datetime):
+                local = dtstart.astimezone(TZ)
+                d, tm = local.date(), local.strftime("%H:%M")
+                if isinstance(dtend, datetime):
+                    end_local = dtend.astimezone(TZ)
+                    te, end_d = end_local.strftime("%H:%M"), end_local.date()
+                    # Endet exakt um Mitternacht: gehört noch zum Vortag (sonst "Phantom-Tag" ohne Inhalt)
+                    if end_d > d and end_local.time() == datetime.min.time():
+                        end_d -= timedelta(days=1)
+                else:
+                    te, end_d = "", d
             else:
-                te, end_d = "", d
-        else:
-            # Ganztägiger Termin: DTSTART/DTEND sind reine Datumswerte, DTEND ist laut
-            # iCal-Spec EXKLUSIV (der Tag NACH dem letzten Tag) und muss daher -1 Tag gerechnet werden.
-            d, tm, te = dtstart, "", ""
-            end_d = (dtend - timedelta(days=1)) if isinstance(dtend, date) and dtend > dtstart else d
-        if end_d < d:
-            end_d = d
-        out.append({"date": d.isoformat(), "end_date": end_d.isoformat(), "time": tm, "end_time": te, "title": title})
+                # Ganztägiger Termin: DTSTART/DTEND sind reine Datumswerte, DTEND ist laut
+                # iCal-Spec EXKLUSIV (der Tag NACH dem letzten Tag) und muss daher -1 Tag gerechnet werden.
+                d, tm, te = dtstart, "", ""
+                end_d = (dtend - timedelta(days=1)) if isinstance(dtend, date) and dtend > dtstart else d
+            if end_d < d:
+                end_d = d
+            # Dedup (z.B. falls dieselbe Kalender-Adresse versehentlich doppelt hinterlegt ist)
+            key = (uid, d.isoformat(), tm)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"date": d.isoformat(), "end_date": end_d.isoformat(), "time": tm, "end_time": te, "title": title})
+    if not any_ok:
+        sys.exit("FEHLER: Keine der hinterlegten Kalender-Adressen (ICS_URL/ICS_URLS) konnte geladen werden – "
+                  + " | ".join(errors) + ". Bitte in Google Kalender → Einstellungen → jeweiliger Kalender → "
+                  "'Kalender integrieren' die 'Privatadresse im iCal-Format' (bzw. bei öffentlichen Kalendern "
+                  "wie Feiertagen die 'Öffentliche Adresse im iCal-Format') neu kopieren.")
     out.sort(key=lambda e: (e["date"], e["time"]))
     return out
 
@@ -2022,18 +2040,42 @@ def main():
          weather, day_focus, news_digest) = testdata(today)
     else:
         token = (os.environ.get("TODOIST_TOKEN") or "").strip()
-        ics = (os.environ.get("ICS_URL") or "").strip()
+        # ICS_URL: einzelner Kalender (Bestand). ICS_URLS: beliebig viele weitere,
+        # getrennt durch Zeilenumbruch oder Komma (z.B. "Privat" + "Feiertage in
+        # Deutschland" zusätzlich zum Standard-Kalender) – alle werden zusammengeführt.
+        def _norm_ics_url(u):
+            # Apple/iCloud liefert "webcal://..."-Adressen – das ist nur ein Hinweis für
+            # Kalender-Apps, sich zu abonnieren, und funktioniert per HTTP(S) genauso wie
+            # ein normaler Link. requests kennt das Schema "webcal" aber nicht, daher hier
+            # automatisch auf https:// umschreiben.
+            if u.lower().startswith("webcal://"):
+                return "https://" + u[len("webcal://"):]
+            if u.lower().startswith("webcals://"):
+                return "https://" + u[len("webcals://"):]
+            return u
+
+        ics_primary = (os.environ.get("ICS_URL") or "").strip()
+        ics_extra_raw = (os.environ.get("ICS_URLS") or "").strip()
+        ics_extra = [u.strip() for chunk in ics_extra_raw.splitlines() for u in chunk.split(",") if u.strip()]
+        ics_list = [_norm_ics_url(u) for u in ([ics_primary] if ics_primary else []) + ics_extra]
+        # Duplikate entfernen, Reihenfolge erhalten (falls dieselbe Adresse in ICS_URL und ICS_URLS steht)
+        seen_ics, ics_list_dedup = set(), []
+        for u in ics_list:
+            if u not in seen_ics:
+                seen_ics.add(u)
+                ics_list_dedup.append(u)
+        ics_list = ics_list_dedup
         trello_key = (os.environ.get("TRELLO_KEY") or "").strip()
         trello_token = (os.environ.get("TRELLO_TOKEN") or "").strip()
         anthropic_key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
         tasks, done_today = fetch_todoist(token) if token else ([], 0)
-        if ics:
+        if ics_list:
             y0, m0 = ym_add(today.year, today.month, -1)
             y1, m1 = ym_add(today.year, today.month, 13)
             start = datetime.combine(date(y0, m0, 1) - timedelta(days=7), datetime.min.time(), TZ)
             end = datetime.combine(date(y1, m1, 1) + timedelta(days=7), datetime.min.time(), TZ)
-            events = fetch_events(ics, start, end)
-            print(f"Kalender: {len(events)} Termine geladen")
+            events = fetch_events(ics_list, start, end)
+            print(f"Kalender: {len(events)} Termine geladen ({len(ics_list)} Kalender-Adresse(n))")
         else:
             events = []
         cardshows, shows_note = fetch_cardshows(today)
