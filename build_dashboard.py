@@ -50,6 +50,22 @@ PODCAST_MODEL = os.environ.get("PODCAST_MODEL", "claude-haiku-4-5-20251001")
 PODCAST_MAX_NEW_PER_RUN = 12     # bremst den Erst-Backfill über mehrere Läufe ab, statt alles auf einmal
 PODCAST_STOP_AFTER_MISSES = 5    # so viele Folgen ohne Transkript hintereinander -> älter wird nicht mehr geprüft
 PODCAST_FEED_SCAN_LIMIT = 60     # wie viele der neuesten Feed-Einträge je Lauf überhaupt betrachtet werden
+# Wetter: Stuttgart, kostenlose Open-Meteo-API (kein Key nötig)
+WEATHER_LAT, WEATHER_LON = 48.7758, 9.1829
+WMO_CODES = {
+    0: ("☀️", "Klar"), 1: ("🌤️", "Meist sonnig"), 2: ("⛅", "Teilweise bewölkt"), 3: ("☁️", "Bedeckt"),
+    45: ("🌫️", "Nebel"), 48: ("🌫️", "Nebel (Reif)"),
+    51: ("🌦️", "Leichter Nieselregen"), 53: ("🌦️", "Nieselregen"), 55: ("🌧️", "Starker Nieselregen"),
+    56: ("🌧️", "Gefrierender Niesel"), 57: ("🌧️", "Gefrierender Niesel"),
+    61: ("🌦️", "Leichter Regen"), 63: ("🌧️", "Regen"), 65: ("🌧️", "Starker Regen"),
+    66: ("🌧️", "Gefrierender Regen"), 67: ("🌧️", "Gefrierender Regen"),
+    71: ("🌨️", "Leichter Schneefall"), 73: ("🌨️", "Schneefall"), 75: ("❄️", "Starker Schneefall"), 77: ("❄️", "Schneegriesel"),
+    80: ("🌦️", "Leichte Schauer"), 81: ("🌧️", "Schauer"), 82: ("⛈️", "Heftige Schauer"),
+    85: ("🌨️", "Schneeschauer"), 86: ("❄️", "Starke Schneeschauer"),
+    95: ("⛈️", "Gewitter"), 96: ("⛈️", "Gewitter mit Hagel"), 99: ("⛈️", "Schweres Gewitter mit Hagel"),
+}
+# News: welche Quellen zählen als "Sport" (Rest fällt unter "Weitere Themen")
+NEWS_SPORT_SOURCES = {"kicker", "LigaInsider"}
 
 esc = html.escape
 
@@ -427,6 +443,105 @@ def fetch_trello(key, token, today):
         return [], "Trello nicht erreichbar – TRELLO_KEY/TRELLO_TOKEN prüfen."
 
 
+# ----------------------------------------------------------------- Wetter ---
+def fetch_weather():
+    """7-Tage-Vorhersage für Stuttgart über die kostenlose Open-Meteo-API (kein Secret nötig)."""
+    import requests
+    try:
+        r = requests.get("https://api.open-meteo.com/v1/forecast", params={
+            "latitude": WEATHER_LAT, "longitude": WEATHER_LON,
+            "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+            "timezone": "Europe/Berlin", "forecast_days": 7,
+        }, timeout=20, headers=UA)
+        r.raise_for_status()
+        d = r.json()["daily"]
+        codes = d.get("weather_code") or d.get("weathercode") or []
+        tmax = d.get("temperature_2m_max") or []
+        tmin = d.get("temperature_2m_min") or []
+        rain = d.get("precipitation_probability_max") or []
+        days = []
+        for i, iso in enumerate(d.get("time", [])):
+            icon, label = WMO_CODES.get(codes[i] if i < len(codes) else None, ("🌡️", "—"))
+            days.append({
+                "date": iso, "icon": icon, "label": label,
+                "tmax": round(tmax[i]) if i < len(tmax) and tmax[i] is not None else None,
+                "tmin": round(tmin[i]) if i < len(tmin) and tmin[i] is not None else None,
+                "rain": rain[i] if i < len(rain) else None,
+            })
+        save_cache("weather", days)
+        print(f"Wetter: {len(days)} Tage geladen (Stuttgart)")
+        return days, None
+    except Exception as e:
+        cached = load_cache("weather")
+        if cached:
+            print(f"Hinweis: Wetter nicht erreichbar ({e}) – nutze Zwischenspeicher.")
+            return cached, "Stand vom letzten erfolgreichen Abruf"
+        print(f"Hinweis: Wetter nicht verfügbar ({e}).")
+        return [], "Quelle derzeit nicht erreichbar"
+
+
+# ------------------------------------------------------------- Tages-Fokus ---
+def fetch_day_focus(api_key, tasks, events, cardshows, trello, today):
+    """Kurze KI-Einordnung für Tag+Woche – wird unabhängig davon, wie oft das
+    Dashboard an einem Kalendertag aktualisiert wird, nur EINMAL pro Tag
+    tatsächlich per Claude API berechnet (Cache-Key = Datum)."""
+    key_today = today.isoformat()
+    cache = load_cache("dayfocus") or {}
+    if cache.get("date") == key_today and cache.get("lines"):
+        return cache["lines"], None
+    if not api_key:
+        return None, ("Noch nicht eingerichtet – Secret ANTHROPIC_API_KEY hinterlegen, dann erscheint "
+                       "hier täglich eine kurze Einordnung für Tag und Woche.")
+
+    monday = today - timedelta(days=today.weekday())
+    week_end = monday + timedelta(days=6)
+    week_events = [e for e in events if monday.isoformat() <= e["date"] <= week_end.isoformat()]
+    week_tasks = [t for t in tasks if t["due"] and monday.isoformat() <= t["due"] <= week_end.isoformat()]
+    overdue_tasks = [t for t in tasks if t["due"] and t["due"] < key_today]
+    overdue_trello = [c["name"] for b in (trello or []) for l in b["lists"] for c in l["cards"] if c.get("overdue")]
+    de_shows_sorted = sorted([s for s in cardshows if s.get("is_de") and s["start"] >= key_today],
+                              key=lambda s: s["start"])
+    next_de_show = de_shows_sorted[0] if de_shows_sorted else None
+
+    lines_in = [f"Heutiges Datum: {key_today} ({WD_LONG[today.weekday()]})."]
+    lines_in.append("Termine diese Woche: " + ("; ".join(
+        f'{e["date"]} {e["time"] or "ganztägig"} {e["title"]}' for e in week_events) or "keine"))
+    lines_in.append("Aufgaben mit Fälligkeit diese Woche: " + ("; ".join(
+        f'{t["due"]} {t["content"]} ({t["area"]})' for t in week_tasks) or "keine"))
+    lines_in.append("Überfällige Aufgaben: " + ("; ".join(t["content"] for t in overdue_tasks) or "keine"))
+    lines_in.append("Überfällige Trello-Karten: " + ("; ".join(overdue_trello) or "keine"))
+    lines_in.append("Nächste Cardshow in Deutschland: " + (
+        f'{next_de_show["start"]} {next_de_show["name"]}' if next_de_show else "keine bekannt"))
+
+    prompt = (
+        "Du bist der persönliche Assistent für ein privates Dashboard. Schreib auf Basis der folgenden "
+        "Rohdaten eine kurze, konkrete Einordnung für HEUTE und DIESE WOCHE auf Deutsch (3 bis 5 knappe, "
+        "eigenständige Sätze, die konkrete Namen/Daten aus den Rohdaten nennen). Priorisiere Dringendes "
+        "(überfällig, heute/morgen fällig) zuerst. Gib NUR die Sätze zurück, einen pro Zeile, ohne "
+        "Nummerierung, ohne Aufzählungszeichen, ohne Einleitung oder Floskeln.\n\n" + "\n".join(lines_in)
+    )
+    import requests
+    try:
+        r = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json={"model": PODCAST_MODEL, "max_tokens": 400, "messages": [{"role": "user", "content": prompt}]},
+            timeout=60)
+        r.raise_for_status()
+        data = r.json()
+        raw = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+        out_lines = [re.sub(r"^[\-•*\d\.\)\s]+", "", ln).strip() for ln in raw.splitlines()]
+        out_lines = [ln for ln in out_lines if ln]
+    except Exception as e:
+        print(f"Hinweis: Tages-Fokus fehlgeschlagen ({e}).")
+        return None, None
+    if not out_lines:
+        return None, None
+    save_cache("dayfocus", {"date": key_today, "lines": out_lines})
+    print("Tages-Fokus: neu berechnet für heute.")
+    return out_lines, None
+
+
 # --------------------------------------------------------------- Podcast ---
 def _strip_tags(raw):
     """Grober HTML->Text-Konverter (Skripte/Styles raus, Tags raus, Entities aufgelöst)."""
@@ -476,6 +591,10 @@ def _fetch_transcript_text(ep):
             r = requests.get(ep["transcript_url"], timeout=30, headers=UA)
             if r.status_code == 200 and r.text.strip():
                 text = r.text.strip()
+                # Manche Feeds liefern das Transkript als JSON-Array von Sprechsegmenten
+                # (z.B. [{"start":..,"end":..,"text":".."}, ...]) statt als VTT/SRT-Text.
+                # Ohne diese Sonderbehandlung würde die rohe JSON-Syntax (Klammern,
+                # "start"/"end"-Felder) als Fließtext an die Zusammenfassung weitergereicht.
                 if text[:1] in "[{":
                     try:
                         data = json.loads(text)
@@ -496,6 +615,7 @@ def _fetch_transcript_text(ep):
                     return text
         except Exception:
             pass
+    # Fallback: die Podigee-Episodenseite veröffentlicht ein Transkript unter .../transcript
     try:
         r = requests.get(ep["url"].rstrip("/") + "/transcript", timeout=30, headers=UA)
         if r.status_code != 200:
@@ -722,6 +842,61 @@ def fetch_news():
     return sources
 
 
+def summarize_news_digest(sources, api_key, today):
+    """Kurze KI-Verdichtung je Kategorie (Sport / Weitere Themen), 1x pro Tag und
+    Kategorie gecacht (cache/newsdigest.json) – bei häufigeren Dashboard-Läufen am
+    selben Tag entsteht kein zusätzlicher API-Aufruf. Eingabe sind nur die
+    Schlagzeilen (kein Volltext), das hält Kosten und Kontextlänge minimal."""
+    key_today = today.isoformat()
+    cache = load_cache("newsdigest") or {}
+    if cache.get("date") != key_today:
+        cache = {"date": key_today}
+    groups = {
+        "sport": [s for s in sources if s["name"] in NEWS_SPORT_SOURCES],
+        "andere": [s for s in sources if s["name"] not in NEWS_SPORT_SOURCES],
+    }
+    labels = {"sport": "Sport", "andere": "Weitere Themen"}
+    result = {}
+    import requests
+    for key, srcs in groups.items():
+        if cache.get(key):
+            result[key] = cache[key]
+            continue
+        titles = [it["title"] for s in srcs for it in s.get("items", [])][:30]
+        if not api_key or not titles:
+            result[key] = None
+            continue
+        prompt = (
+            f'Hier sind aktuelle deutsche Nachrichten-Überschriften aus der Kategorie "{labels[key]}":\n\n'
+            + "\n".join(f"- {t}" for t in titles)
+            + '\n\nFasse daraus die 3 bis 4 wichtigsten Themen des Tages als kurze, eigenständige Sätze '
+              "auf Deutsch zusammen (thematisch gebündelt, nicht jede Überschrift einzeln aufzählen). "
+              "Gib NUR die Sätze zurück, einen pro Zeile, ohne Nummerierung, ohne Aufzählungszeichen, "
+              "ohne Einleitung."
+        )
+        try:
+            r = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                json={"model": PODCAST_MODEL, "max_tokens": 400, "messages": [{"role": "user", "content": prompt}]},
+                timeout=60)
+            r.raise_for_status()
+            data = r.json()
+            raw = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
+            lines = [re.sub(r"^[\-•*\d\.\)\s]+", "", ln).strip() for ln in raw.splitlines()]
+            lines = [ln for ln in lines if ln]
+            result[key] = lines or None
+            if result[key]:
+                print(f"News-Digest ({labels[key]}): neu berechnet für heute.")
+        except Exception as e:
+            print(f"Hinweis: News-Digest {labels[key]} fehlgeschlagen ({e}).")
+            result[key] = None
+    cache["sport"] = result.get("sport")
+    cache["andere"] = result.get("andere")
+    save_cache("newsdigest", cache)
+    return result
+
+
 # ------------------------------------------------------------- Testdaten ---
 def testdata(today):
     tasks = [
@@ -834,10 +1009,40 @@ def testdata(today):
              "Parallel: neue Restock-Ankündigungen sorgen erneut für kurzfristige Preisspitzen im Sekundärmarkt.",
          ]},
     ]
-    return tasks, 2, events, shows, news, releases, trello, podcast
+    weather = [
+        {"date": (today + timedelta(days=i)).isoformat(), "icon": icon, "label": label, "tmax": tmax, "tmin": tmin, "rain": rain}
+        for i, (icon, label, tmax, tmin, rain) in enumerate([
+            ("⛅", "Teilweise bewölkt", 24, 15, 10), ("☀️", "Klar", 27, 16, 0), ("🌦️", "Leichte Schauer", 22, 14, 55),
+            ("⛈️", "Gewitter", 21, 15, 80), ("🌤️", "Meist sonnig", 25, 14, 15), ("☀️", "Klar", 28, 17, 5),
+            ("⛅", "Teilweise bewölkt", 26, 16, 20),
+        ])
+    ]
+    day_focus = [
+        "Heute eng: Wochenplanung Top-3-Prioritäten und das Mathe-Übungsblatt sind beide diese Woche fällig.",
+        "Physio ZAR steht in 3 Tagen an, danach folgt der Vor-Ort-Termin Grundlagen Sportbusiness in Nürtingen.",
+        "Die WMF-Karte „WICHTIG: Checkliste PFOA Vorgehen“ ist bereits überfällig – zuerst angehen.",
+        "Nächste Cardshow in Deutschland: Tradenight Der Kiosk 030 in Berlin in 17 Tagen.",
+    ]
+    news_digest = {
+        "sport": ["Bundesliga-Transferfenster: mehrere Wechsel bahnen sich an, u. a. bei Dompé/HSV.",
+                  "Kicker berichtet über anstehende Kaderentscheidungen vor dem Saisonstart."],
+        "andere": ["ZDFheute: Beispielhafte Kernthemen des Tages aus den Testdaten."],
+    }
+    return tasks, 2, events, shows, news, releases, trello, podcast, weather, day_focus, news_digest
 
 
 # ------------------------------------------------------------------ HTML ---
+def _countdown_target(iso_date, time_str=None, end_of_day=False):
+    """Baut ein zeitzonenbewusstes datetime-Ziel für eine Countdown-Kachel."""
+    d = date.fromisoformat(iso_date)
+    if time_str:
+        hh, mm = (int(x) for x in time_str.split(":")[:2])
+        return datetime(d.year, d.month, d.day, hh, mm, tzinfo=TZ)
+    if end_of_day:
+        return datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=TZ)
+    return datetime(d.year, d.month, d.day, 0, 0, tzinfo=TZ)
+
+
 def ev_label(e):
     """Titel eines Termins, bei mehrtägigen Terminen mit Tag-X/Y-Hinweis."""
     total = e.get("multi_total", 1)
@@ -887,10 +1092,14 @@ def fmt_show_date(s):
 
 def build_html(tasks, done_today, events, cardshows, news, refresh_token,
                shows_note=None, releases=None, releases_note=None,
-               trello=None, trello_note=None, podcast=None, podcast_note=None):
+               trello=None, trello_note=None, podcast=None, podcast_note=None,
+               weather=None, weather_note=None, day_focus=None, day_focus_note=None,
+               news_digest=None):
     releases = releases or []
     trello = trello or []
     podcast = podcast or []
+    weather = weather or []
+    news_digest = news_digest or {}
     now = datetime.now(TZ)
     today = now.date()
     monday = today - timedelta(days=today.weekday())
@@ -991,6 +1200,64 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
                         if e["date"] <= week_days[6].isoformat()
                         and e.get("end_date", e["date"]) >= monday.isoformat())
     kw = today.isocalendar()[1]
+
+    # --- Countdowns: Zeit bis nächster Termin / nächste fällige Aufgabe / nächste Cardshow (DE)
+    cd_event = None
+    if future:
+        ne = future[0]
+        cd_event = {"target": _countdown_target(ne["date"], ne["time"] or None).isoformat(), "label": ev_label(ne)}
+    upcoming_tasks = sorted([t for t in tasks if t["due"] and t["due"] >= today.isoformat()], key=lambda t: t["due"])
+    cd_task = None
+    if upcoming_tasks:
+        t0 = upcoming_tasks[0]
+        cd_task = {"target": _countdown_target(t0["due"], end_of_day=True).isoformat(), "label": t0["content"]}
+    de_shows_sorted = sorted([s for s in cardshows if s.get("is_de") and s["start"] >= today.isoformat()],
+                              key=lambda s: s["start"])
+    cd_show = None
+    if de_shows_sorted:
+        s0 = de_shows_sorted[0]
+        cd_show = {"target": _countdown_target(s0["start"], s0.get("time")).isoformat(), "label": s0["name"]}
+
+    countdown_specs = [("⏳ Nächster Termin", cd_event), ("📌 Nächste fällige Aufgabe", cd_task),
+                        ("🃏 Nächste Cardshow (DE)", cd_show)]
+    countdown_html = "".join(
+        f'''
+    <div class="tile cdtile">
+      <div class="label">{lbl}</div>
+      <div class="value cdval" data-target="{esc(cd["target"])}">–</div>
+      <div class="sub">{esc(cd["label"])}</div>
+    </div>''' if cd else f'''
+    <div class="tile cdtile">
+      <div class="label">{lbl}</div>
+      <div class="value small">—</div>
+      <div class="sub">nichts Anstehendes</div>
+    </div>'''
+        for lbl, cd in countdown_specs)
+
+    # --- Wetter (Stuttgart, 7 Tage)
+    weather_cards = []
+    for w in weather[:7]:
+        wd_ = date.fromisoformat(w["date"])
+        rain_str = f'{w["rain"]}%' if w.get("rain") is not None else "–"
+        tmax_str = f'{w["tmax"]}°' if w.get("tmax") is not None else "–"
+        tmin_str = f'{w["tmin"]}°' if w.get("tmin") is not None else "–"
+        weather_cards.append(f'''
+    <div class="wday">
+      <div class="wday-d">{WD[wd_.weekday()]} {wd_.day:02d}.{wd_.month:02d}.</div>
+      <div class="wicon" title="{esc(w.get("label",""))}">{w.get("icon","🌡️")}</div>
+      <div class="wtemp">{tmax_str} <span class="wtmin">{tmin_str}</span></div>
+      <div class="wrain">💧 {rain_str}</div>
+    </div>''')
+    weather_html = "".join(weather_cards) if weather_cards else (
+        f'<div class="empty">{esc(weather_note) if weather_note else "Wetterdaten gerade nicht verfügbar."}</div>')
+
+    # --- Tages-Fokus (KI)
+    if day_focus:
+        day_focus_html = '<ul class="dftakeaways">' + "".join(f"<li>{esc(l)}</li>" for l in day_focus) + '</ul>'
+    elif day_focus_note:
+        day_focus_html = f'<div class="empty">{esc(day_focus_note)}</div>'
+    else:
+        day_focus_html = '<div class="empty">Fokus wird beim nächsten automatischen Lauf berechnet.</div>'
 
     if todays_ev:
         today_panel = "".join(
@@ -1178,6 +1445,16 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
       {body}{note or ("" if lis else '<div class="empty">Keine Meldungen verfügbar.</div>')}
     </div>''')
 
+    digest_parts = []
+    for key, title in (("sport", "⚽ Sport"), ("andere", "📰 Weitere Themen")):
+        lines = news_digest.get(key)
+        if lines:
+            body = '<ul class="dftakeaways">' + "".join(f"<li>{esc(l)}</li>" for l in lines) + '</ul>'
+        else:
+            body = '<div class="empty">Kurzfassung erscheint beim nächsten automatischen Lauf.</div>'
+        digest_parts.append(f'<div class="panel digestpanel"><h2>{title}</h2>{body}</div>')
+    digest_html = "".join(digest_parts)
+
     # --- Podcast ("Das Hobby")
     podcast_cards = []
     for i, ep in enumerate(podcast):
@@ -1241,14 +1518,14 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   :root {{
     --surface-1: #fcfcfb; --page: #f9f9f7; --text-primary: #0b0b0b; --text-secondary: #52514e;
     --muted: #898781; --hairline: #e1e0d9; --border: rgba(11,11,11,0.10);
-    --privat: #1baf7a; --arbeit: #2a78d6; --studium: #4a3aa7; --trello: #eda100; --podcast: #008300;
+    --privat: #1baf7a; --arbeit: #2a78d6; --studium: #4a3aa7; --trello: #eda100; --podcast: #008300; --focus: #0e7490;
     --good: #0ca30c; --good-text: #006300; --done-ink: #898781;
   }}
   @media (prefers-color-scheme: dark) {{
     :root {{
       --surface-1: #1a1a19; --page: #0d0d0d; --text-primary: #ffffff; --text-secondary: #c3c2b7;
       --muted: #898781; --hairline: #2c2c2a; --border: rgba(255,255,255,0.10);
-      --privat: #199e70; --arbeit: #3987e5; --studium: #9085e9; --trello: #c98500; --podcast: #008300; --good-text: #0ca30c;
+      --privat: #199e70; --arbeit: #3987e5; --studium: #9085e9; --trello: #c98500; --podcast: #008300; --focus: #22a6c9; --good-text: #0ca30c;
     }}
   }}
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -1402,6 +1679,25 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   .pdot {{ width: 7px; height: 7px; border-radius: 50%; background: var(--hairline); cursor: pointer; }}
   .pdot.active {{ background: var(--podcast); }}
   .pcount {{ text-align: center; font-size: 12px; color: var(--muted); margin-top: 6px; }}
+  .focuspanel {{ margin-bottom: 20px; border-top: 3px solid var(--focus); }}
+  .panel-head {{ display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }}
+  .panel-head h2 {{ font-size: 15px; font-weight: 650; }}
+  .panel-head .count {{ font-size: 12px; color: var(--muted); }}
+  ul.dftakeaways {{ list-style: none; }}
+  ul.dftakeaways li {{ position: relative; padding: 5px 0 5px 18px; font-size: 14px; line-height: 1.45; }}
+  ul.dftakeaways li::before {{ content: "•"; position: absolute; left: 2px; color: var(--focus); font-weight: 700; }}
+  .digestpanel {{ border-top: 3px solid var(--focus); }}
+  .countdowns {{ margin-bottom: 12px; }}
+  .cdtile {{ border-top: 3px solid var(--focus); }}
+  .cdtile .value.cdval {{ font-variant-numeric: tabular-nums; }}
+  .weatherwrap {{ margin-bottom: 20px; }}
+  .weekrow {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(88px, 1fr)); gap: 10px; }}
+  .wday {{ background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 12px 8px; text-align: center; }}
+  .wday-d {{ font-size: 11.5px; color: var(--muted); margin-bottom: 6px; }}
+  .wicon {{ font-size: 24px; margin-bottom: 6px; }}
+  .wtemp {{ font-size: 14px; font-weight: 650; }}
+  .wtmin {{ font-weight: 500; color: var(--text-secondary); }}
+  .wrain {{ font-size: 11.5px; color: var(--text-secondary); margin-top: 4px; }}
   footer {{ color: var(--muted); font-size: 12px; line-height: 1.5; border-top: 1px solid var(--hairline); padding-top: 12px; }}
   footer strong {{ color: var(--text-secondary); font-weight: 600; }}
 </style>
@@ -1428,12 +1724,22 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   </nav>
 
   <div id="view-today" class="view active">
+  <section class="panel focuspanel">
+    <div class="panel-head"><h2>🎯 Fokus · heute &amp; diese Woche</h2></div>
+    {day_focus_html}
+  </section>
+  <section class="tiles countdowns">{countdown_html}
+  </section>
   <section class="tiles">
     <div class="tile"><div class="label">Offene Aufgaben</div><div class="value">{open_total}</div><div class="sub">{per_area}</div></div>
     <div class="tile"><div class="label">Heute erledigt</div><div class="value">{done_today}</div><div class="sub">Weiter so</div></div>
     <div class="tile"><div class="label">Nächster Termin</div><div class="value small">{next_ev_title}</div><div class="sub">{next_ev_sub}</div></div>
     <div class="tile"><div class="label">Termine diese Woche</div><div class="value">{week_ev_count}</div><div class="sub">KW {kw}</div></div>
     <div class="tile"><div class="label">Trello offen</div><div class="value">{trello_total}</div><div class="sub">{trello_sub}</div></div>
+  </section>
+  <section class="weatherwrap">
+    <div class="panel-head"><h2>🌤️ Wetter · Stuttgart</h2><span class="count">7 Tage</span></div>
+    <div class="weekrow">{weather_html}</div>
   </section>
   <section class="areas">{"".join(area_cards)}
   </section>
@@ -1488,7 +1794,8 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
 
   <div id="view-news" class="view">
     <h2 class="vtitle">News</h2>
-    <div class="srcline">Stand {stand} Uhr · aktualisiert sich mit jedem Dashboard-Update</div>
+    <div class="srcline">Stand {stand} Uhr · aktualisiert sich mit jedem Dashboard-Update · Kurzfassung 1×/Tag per KI, Rohliste darunter jederzeit aktuell</div>
+    <div class="row2">{digest_html}</div>
     <div class="row3">{"".join(news_panels)}</div>
   </div>
 
@@ -1584,6 +1891,25 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
       touchX = null;
     }}, {{ passive: true }});
     show(0);
+  }})();
+  // Countdown-Kacheln: live tickende Zeit bis Termin/Aufgabe/Cardshow
+  (() => {{
+    const els = document.querySelectorAll('.cdval');
+    if (!els.length) return;
+    function fmt(ms) {{
+      if (ms <= 0) return 'jetzt';
+      const s = Math.floor(ms / 1000);
+      const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+      if (d > 0) return `${{d}}T ${{h}}Std`;
+      if (h > 0) return `${{h}}Std ${{m}}Min`;
+      return `${{m}}Min`;
+    }}
+    function tick() {{
+      const now = Date.now();
+      els.forEach(el => {{ el.textContent = fmt(new Date(el.dataset.target).getTime() - now); }});
+    }}
+    tick();
+    setInterval(tick, 30000);
   }})();{refresh_js}
 </script>
 </body>
@@ -1690,9 +2016,10 @@ def main():
     now = datetime.now(TZ)
     today = now.date()
 
-    shows_note = releases_note = trello_note = podcast_note = None
+    shows_note = releases_note = trello_note = podcast_note = weather_note = day_focus_note = None
     if os.environ.get("DASH_TEST") == "1":
-        tasks, done_today, events, cardshows, news, releases, trello, podcast = testdata(today)
+        (tasks, done_today, events, cardshows, news, releases, trello, podcast,
+         weather, day_focus, news_digest) = testdata(today)
     else:
         token = (os.environ.get("TODOIST_TOKEN") or "").strip()
         ics = (os.environ.get("ICS_URL") or "").strip()
@@ -1712,19 +2039,24 @@ def main():
         cardshows, shows_note = fetch_cardshows(today)
         releases, releases_note = fetch_releases(today)
         trello, trello_note = fetch_trello(trello_key, trello_token, today)
+        weather, weather_note = fetch_weather()
+        day_focus, day_focus_note = fetch_day_focus(anthropic_key, tasks, events, cardshows, trello, today)
         news = fetch_news()
+        news_digest = summarize_news_digest(news, anthropic_key, today)
         podcast, podcast_note = fetch_podcast(anthropic_key)
 
     plain = build_html(tasks, done_today, events, cardshows, news, refresh_token,
                        shows_note, releases, releases_note, trello, trello_note,
-                       podcast, podcast_note)
+                       podcast, podcast_note, weather, weather_note,
+                       day_focus, day_focus_note, news_digest)
     encrypted = encrypt_page(plain, password)
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(encrypted)
     trello_n = sum(len(l["cards"]) for b in trello for l in b["lists"])
     print(f"OK: index.html geschrieben ({len(encrypted)} Zeichen), {len(tasks)} Aufgaben, "
           f"{len(events)} Termine, {len(cardshows)} Cardshows, {len(releases)} Releases, "
-          f"{trello_n} Trello-Karten, {len(podcast)} Podcast-Folgen, Stand {now.strftime('%H:%M')} Uhr")
+          f"{trello_n} Trello-Karten, {len(podcast)} Podcast-Folgen, {len(weather)} Wetter-Tage, "
+          f"Stand {now.strftime('%H:%M')} Uhr")
 
 
 if __name__ == "__main__":
