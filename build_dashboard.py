@@ -12,6 +12,10 @@ Verschlüsselung:
   - AES-256-GCM, Schlüssel via PBKDF2-SHA256           [Secret: DASH_PASSWORD]
 Optional:
   - REFRESH_TOKEN: Fine-grained PAT (nur Actions:write) für den ⟳-Knopf.
+  - HOLIDAY_EXCLUDE: Titel-Fragmente (Termine/Feiertage), die trotz gültigem
+    Kalender-Feed ausgefiltert werden sollen (z.B. irrelevante regionale
+    Feiertage – Googles "Feiertag ausblenden" wirkt nur auf die eigene Ansicht,
+    nicht auf den iCal-Export selbst).
 
 Testmodus: DASH_TEST=1 nutzt eingebaute Beispieldaten statt der APIs.
 Öffentliche Daten (Cardshows/News) werden in cache/ zwischengespeichert,
@@ -169,17 +173,22 @@ def map_todoist(projects, raw_tasks):
 
 
 # ------------------------------------------------------------------- iCal ---
-def fetch_events(ics_urls, start, end):
+def fetch_events(ics_urls, start, end, exclude_titles=None):
     """Google-Kalender-Termine [start, end) inkl. aufgelöster Serientermine –
     über einen oder mehrere Kalender (ICS_URL + optional ICS_URLS) zusammengeführt.
     Eine einzelne nicht ladbare Kalender-Adresse bricht den Bau nicht ab (Warnung
     statt Abbruch), nur wenn KEINE der Adressen ladbar ist, wird abgebrochen.
     Jeder Termin bekommt "cal" = Index seiner Quelle (Reihenfolge ICS_URL, dann
     ICS_URLS) für die Farbcodierung; zusätzlich wird cal_meta zurückgegeben
-    (Name je Kalender aus X-WR-CALNAME, Fallback "Kalender N")."""
+    (Name je Kalender aus X-WR-CALNAME, Fallback "Kalender N").
+    exclude_titles: optionale Liste von Titel-Fragmenten (z.B. aus HOLIDAY_EXCLUDE) –
+    Termine, deren Titel eines dieser Fragmente enthält (Groß-/Kleinschreibung egal),
+    werden verworfen. Nötig, weil Googles persönliches "Feiertag ausblenden" nur die
+    eigene Ansicht betrifft, nicht aber die exportierte iCal-Adresse selbst."""
     import requests, icalendar, recurring_ical_events
     if isinstance(ics_urls, str):
         ics_urls = [ics_urls]
+    exclude_norm = [t.strip().casefold() for t in (exclude_titles or []) if t.strip()]
     out, seen, any_ok, errors = [], set(), False, []
     cal_meta = []
     for idx, ics_url in enumerate(ics_urls):
@@ -220,6 +229,8 @@ def fetch_events(ics_urls, start, end):
                 end_d = (dtend - timedelta(days=1)) if isinstance(dtend, date) and dtend > dtstart else d
             if end_d < d:
                 end_d = d
+            if exclude_norm and any(t in title.casefold() for t in exclude_norm):
+                continue
             # Dedup (z.B. falls dieselbe Kalender-Adresse versehentlich doppelt hinterlegt ist)
             key = (uid, d.isoformat(), tm)
             if key in seen:
@@ -1121,12 +1132,37 @@ def month_grid_html(y, m, ev_by_date, today):
             past = " past" if iso < today.isoformat() else ""
             label = (e["time"] + " " if e["time"] else "") + ev_label(e)
             color = cal_color(e.get("cal"))
-            chips += (f'<div class="chip{past}" title="{esc(label)}" '
+            chips += (f'<div class="chip{past}" data-cal="{e.get("cal", 0)}" title="{esc(label)}" '
                       f'style="background:{_hex_to_rgba(color, 0.14)};border-left-color:{color};">{esc(label)}</div>')
         cells.append(f'<div class="{cls}"><div class="num">{num}</div>{chips}</div>')
         d += timedelta(days=1)
     head = "".join(f"<div>{w}</div>" for w in WD)
     return f'<div class="month-head">{head}</div><div class="month-grid">{"".join(cells)}</div>'
+
+
+def month_agenda_html(y, m, events, today):
+    """Chronologische Terminliste für genau einen Monat (Terminliste-Reiter) –
+    im Gegensatz zu month_grid_html (Kalender-Raster) eine flache Liste,
+    mehrtägige Termine als eine Zeile mit Datumsspanne (wie zuvor bei 'Jahr')."""
+    key_events = [e for e in events if e["date"][:7] == f"{y:04d}-{m:02d}"]
+    if not key_events:
+        return '<div class="empty">Keine Termine in diesem Monat.</div>'
+    rows = []
+    for e in key_events:
+        d = date.fromisoformat(e["date"])
+        d_end = date.fromisoformat(e.get("end_date", e["date"]))
+        tstr = f'{e["time"]}–{e["end_time"]}' if e["time"] else "ganztägig"
+        if d_end == d:
+            dstr = f"{WD[d.weekday()]}, {d.day:02d}.{d.month:02d}."
+        elif d_end.month == d.month and d_end.year == d.year:
+            dstr = f"{d.day:02d}.–{d_end.day:02d}.{d_end.month:02d}."
+        else:
+            dstr = f"{d.day:02d}.{d.month:02d}.–{d_end.day:02d}.{d_end.month:02d}."
+        color = cal_color(e.get("cal"))
+        rows.append(
+            f'<div class="event" data-cal="{e.get("cal", 0)}"><span class="d" style="background:{color}"></span>'
+            f'<span class="time">{dstr} · {tstr}</span><span>{esc(e["title"])}</span></div>')
+    return "".join(rows)
 
 
 def fmt_show_date(s):
@@ -1328,12 +1364,15 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
         today_panel = (f'<div class="empty"><span class="big">Keine Termine heute.</span><br>'
                        f'Nächster Termin: <strong style="color:var(--text-secondary)">{next_ev_title}</strong> ({next_ev_sub}).</div>')
 
-    # --- Kalender-Legende (echte Namen + Farben je hinterlegter Kalender-Adresse)
-    cal_legend = "".join(
-        f'<span><span class="d" style="background:{cal_color(cm["idx"])}"></span>{esc(cm["name"])}</span>'
+    # --- Kalender-Filter (echte Namen + Farben je hinterlegter Kalender-Adresse; per
+    # Checkbox einzeln ein-/ausblendbar, gemeinsam für Woche/Monat/Terminliste)
+    calfilter_html = "".join(
+        f'<label class="cfitem"><input type="checkbox" class="cfbox" data-cal="{cm["idx"]}" checked>'
+        f'<span class="d" style="background:{cal_color(cm["idx"])}"></span>{esc(cm["name"])}</label>'
         for cm in cal_meta if cm.get("ok"))
-    if not cal_legend:
-        cal_legend = f'<span><span class="d" style="background:{cal_color(0)}"></span>Termin (Kalender)</span>'
+    if not calfilter_html:
+        calfilter_html = (f'<label class="cfitem"><input type="checkbox" class="cfbox" data-cal="0" checked>'
+                          f'<span class="d" style="background:{cal_color(0)}"></span>Termin (Kalender)</label>')
 
     # --- Woche: mehrere Wochen (−8 bis +52) navigierbar (Pfeile + "Diese Woche")
     week_wraps = []
@@ -1348,7 +1387,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
             for e in ev_by_date.get(iso, []):
                 tstr = f'<span class="t">{e["time"]}–{e["end_time"]}</span> · ' if e["time"] else ""
                 color = cal_color(e.get("cal"))
-                parts.append(f'<div class="ev" style="background:{_hex_to_rgba(color, 0.12)};border-left-color:{color};">'
+                parts.append(f'<div class="ev" data-cal="{e.get("cal", 0)}" style="background:{_hex_to_rgba(color, 0.12)};border-left-color:{color};">'
                              f'{tstr}{esc(ev_label(e))}</div>')
             for t in task_by_date.get(iso, []):
                 parts.append(f'<div class="due"><span class="d" style="background:var(--{area_var[t["area"]]})"></span>{esc(t["content"])}</div>')
@@ -1380,30 +1419,13 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     month_names_json = json.dumps(MONTHS)
     month_list_json = json.dumps([f"{y}-{m:02d}" for (y, m) in month_list])
 
-    # --- Jahr: alle Termine der nächsten 12 Monate, nach Monat gruppiert
-    horizon = ym_add(today.year, today.month, 12)
-    year_groups, cur_key = [], None
-    upcoming = [e for e in events if e["date"] >= today.isoformat()
-                and date.fromisoformat(e["date"]) < date(horizon[0], horizon[1], 1)]
-    for e in upcoming:
-        d = date.fromisoformat(e["date"])
-        d_end = date.fromisoformat(e.get("end_date", e["date"]))
-        key = f"{MONTHS[d.month-1]} {d.year}"
-        if key != cur_key:
-            year_groups.append(f'<h3 class="ygroup">{key}</h3>')
-            cur_key = key
-        tstr = f'{e["time"]}–{e["end_time"]}' if e["time"] else "ganztägig"
-        if d_end == d:
-            dstr = f"{WD[d.weekday()]}, {d.day:02d}.{d.month:02d}."
-        elif d_end.month == d.month and d_end.year == d.year:
-            dstr = f"{d.day:02d}.–{d_end.day:02d}.{d_end.month:02d}."
-        else:
-            dstr = f"{d.day:02d}.{d.month:02d}.–{d_end.day:02d}.{d_end.month:02d}."
-        year_groups.append(
-            f'<div class="event">{_ev_dot(e)}<span class="time">{dstr} · {tstr}</span>'
-            f'<span>{esc(e["title"])}</span></div>')
-    year_html = "".join(year_groups) if year_groups else \
-        '<div class="empty">Keine Termine in den nächsten 12 Monaten.</div>'
+    # --- Terminliste: wie Monat einzeln je Monat ansteuerbar (Vormonat bis +5 Jahre),
+    # pro Monat aber als chronologische Liste statt als Raster.
+    term_wraps = []
+    for (y, m) in month_list:
+        key = f"{y}-{m:02d}"
+        active = " active" if (y, m) == (today.year, today.month) else ""
+        term_wraps.append(f'<div class="twrap{active}" data-ym="{key}">{month_agenda_html(y, m, events, today)}</div>')
 
     # --- Cardshows (gruppiert nach Monat/Jahr, Monate per Chip filterbar)
     show_parts, show_month_chips = [], []
@@ -1703,6 +1725,18 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   .wlabel {{ font-size: 14px; font-weight: 650; min-width: 200px; }}
   .wtoday-btn {{ margin-left: auto; font-size: 13px !important; padding: 6px 14px; }}
   .wkwrap {{ display: none; }} .wkwrap.active {{ display: block; }}
+  .twrap {{ display: none; }} .twrap.active {{ display: block; }}
+  .subnav {{ display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }}
+  .subnav button {{ padding: 6px 16px; font-size: 13px; font-weight: 600; border-radius: 99px; border: 1px solid var(--border);
+                   background: var(--page); color: var(--text-secondary); cursor: pointer; }}
+  .subnav button.active {{ background: var(--text-primary); color: var(--page); border-color: var(--text-primary); }}
+  .subview {{ display: none; }} .subview.active {{ display: block; }}
+  .calfilter {{ display: flex; gap: 14px; font-size: 12.5px; color: var(--muted); margin-bottom: 18px; flex-wrap: wrap;
+               align-items: center; padding: 10px 12px; background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; }}
+  .calfilter .cf-label {{ font-weight: 650; color: var(--text-secondary); }}
+  .cfitem {{ display: flex; gap: 6px; align-items: center; cursor: pointer; user-select: none; }}
+  .cfitem input {{ cursor: pointer; }}
+  .cfitem .d {{ width: 9px; height: 9px; border-radius: 3px; flex: 0 0 9px; }}
   .month-head {{ display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; font-size: 12px; color: var(--muted); margin-bottom: 6px; text-align: center; }}
   .month-grid {{ display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; margin-bottom: 20px; }}
   .mday {{ background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; min-height: 72px; padding: 6px; font-size: 12px; min-width: 0; overflow: hidden; }}
@@ -1808,10 +1842,8 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   </header>
 
   <nav class="viewnav">
-    <button class="active" data-view="view-today">Heute</button>
-    <button data-view="view-week">Woche</button>
-    <button data-view="view-month">Monat</button>
-    <button data-view="view-year">Jahr</button>
+    <button class="active" data-view="view-today">Übersicht</button>
+    <button data-view="view-kalender">Kalender</button>
     <button data-view="view-shows">Cardshows</button>
     <button data-view="view-releases">Releases</button>
     <button data-view="view-news">News</button>
@@ -1847,37 +1879,50 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   </section>
   </div>
 
-  <div id="view-week" class="view">
-    <h2 class="vtitle">Woche im Überblick</h2>
-    <div class="wknav">
-      <button id="wprev" title="Vorherige Woche">‹</button>
-      <span id="wlabel" class="wlabel">{monday.day:02d}.{monday.month:02d}.–{week_days[6].day:02d}.{week_days[6].month:02d}. · KW {kw}</span>
-      <button id="wnext" title="Nächste Woche">›</button>
-      <button id="wtoday" class="wtoday-btn">Diese Woche</button>
-    </div>
-    <div class="week-grid-wrap">{"".join(week_wraps)}</div>
-    <div class="legend">
-      {cal_legend}
-      <span><span class="d" style="background:var(--privat)"></span>Aufgabe Privat</span>
-      <span><span class="d" style="background:var(--arbeit)"></span>Aufgabe Arbeit</span>
-      <span><span class="d" style="background:var(--studium)"></span>Aufgabe Studium</span>
-    </div>
-  </div>
+  <div id="view-kalender" class="view">
+    <nav class="subnav">
+      <button class="active" data-subview="sub-week">Woche</button>
+      <button data-subview="sub-month">Monat</button>
+      <button data-subview="sub-term">Terminliste</button>
+    </nav>
+    <div class="calfilter"><span class="cf-label">Kalender:</span>{calfilter_html}</div>
 
-  <div id="view-month" class="view">
-    <div class="mnav">
-      <button id="mprev" title="Vorheriger Monat">‹</button>
-      <select id="ysel">{year_options}</select>
-      <select id="msel">{init_month_options}</select>
-      <button id="mnext" title="Nächster Monat">›</button>
+    <div id="sub-week" class="subview active">
+      <h2 class="vtitle">Woche im Überblick</h2>
+      <div class="wknav">
+        <button id="wprev" title="Vorherige Woche">‹</button>
+        <span id="wlabel" class="wlabel">{monday.day:02d}.{monday.month:02d}.–{week_days[6].day:02d}.{week_days[6].month:02d}. · KW {kw}</span>
+        <button id="wnext" title="Nächste Woche">›</button>
+        <button id="wtoday" class="wtoday-btn">Diese Woche</button>
+      </div>
+      <div class="week-grid-wrap">{"".join(week_wraps)}</div>
+      <div class="legend">
+        <span><span class="d" style="background:var(--privat)"></span>Aufgabe Privat</span>
+        <span><span class="d" style="background:var(--arbeit)"></span>Aufgabe Arbeit</span>
+        <span><span class="d" style="background:var(--studium)"></span>Aufgabe Studium</span>
+      </div>
     </div>
-    {"".join(month_wraps)}
-  </div>
 
-  <div id="view-year" class="view">
-    <h2 class="vtitle">Alle Termine · nächste 12 Monate</h2>
-    <div class="legend">{cal_legend}</div>
-    {year_html}
+    <div id="sub-month" class="subview">
+      <div class="mnav">
+        <button id="mprev" title="Vorheriger Monat">‹</button>
+        <select id="ysel">{year_options}</select>
+        <select id="msel">{init_month_options}</select>
+        <button id="mnext" title="Nächster Monat">›</button>
+      </div>
+      {"".join(month_wraps)}
+    </div>
+
+    <div id="sub-term" class="subview">
+      <h2 class="vtitle">Terminliste</h2>
+      <div class="mnav">
+        <button id="tprev" title="Vorheriger Monat">‹</button>
+        <select id="tysel">{year_options}</select>
+        <select id="tmsel">{init_month_options}</select>
+        <button id="tnext" title="Nächster Monat">›</button>
+      </div>
+      {"".join(term_wraps)}
+    </div>
   </div>
 
   <div id="view-shows" class="view">
@@ -1923,46 +1968,63 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
       document.getElementById(btn.dataset.view).classList.add('active');
     }});
   }});
-  // Monat: zweistufig (erst Jahr, dann Monat), Bereich Vormonat bis +5 Jahre
+  // Kalender: Unterreiter Woche/Monat/Terminliste
+  document.querySelectorAll('.subnav button').forEach(btn => {{
+    btn.addEventListener('click', () => {{
+      document.querySelectorAll('.subnav button').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.subview').forEach(v => v.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById(btn.dataset.subview).classList.add('active');
+    }});
+  }});
+  // Monat + Terminliste: zweistufig (erst Jahr, dann Monat), Bereich Vormonat bis +5 Jahre –
+  // dieselbe Logik für beide Reiter, je mit eigenen Dropdowns/Pfeilen/Wraps.
   const MONTHS_BY_YEAR = {months_by_year_json};
   const MONTH_NAMES = {month_names_json};
   const MONTH_LIST = {month_list_json};
-  const ysel = document.getElementById('ysel');
-  const msel = document.getElementById('msel');
-  let mIdx = MONTH_LIST.indexOf(`${{ysel.value}}-${{String(msel.value).padStart(2, '0')}}`);
-  function populateMonths(year, preferMonth) {{
-    const months = MONTHS_BY_YEAR[year] || [];
-    msel.innerHTML = months.map(m => `<option value="${{m}}">${{MONTH_NAMES[m - 1]}}</option>`).join('');
-    msel.value = months.includes(preferMonth) ? preferMonth : months[0];
+  function setupYearMonthNav(cfg) {{
+    const ysel = document.getElementById(cfg.ysel);
+    const msel = document.getElementById(cfg.msel);
+    const wraps = document.querySelectorAll(cfg.wrapSel);
+    if (!ysel || !msel) return;
+    let mIdx = MONTH_LIST.indexOf(`${{ysel.value}}-${{String(msel.value).padStart(2, '0')}}`);
+    function populateMonths(year, preferMonth) {{
+      const months = MONTHS_BY_YEAR[year] || [];
+      msel.innerHTML = months.map(m => `<option value="${{m}}">${{MONTH_NAMES[m - 1]}}</option>`).join('');
+      msel.value = months.includes(preferMonth) ? preferMonth : months[0];
+    }}
+    function showKey(key) {{
+      wraps.forEach(w => w.classList.toggle('active', w.dataset.ym === key));
+    }}
+    function currentKey() {{
+      return `${{ysel.value}}-${{String(msel.value).padStart(2, '0')}}`;
+    }}
+    function gotoIdx(idx) {{
+      idx = Math.max(0, Math.min(MONTH_LIST.length - 1, idx));
+      mIdx = idx;
+      const [y, m] = MONTH_LIST[idx].split('-').map(Number);
+      ysel.value = y;
+      populateMonths(y, m);
+      showKey(MONTH_LIST[idx]);
+    }}
+    ysel.addEventListener('change', () => {{
+      populateMonths(parseInt(ysel.value, 10), parseInt(msel.value, 10));
+      mIdx = MONTH_LIST.indexOf(currentKey());
+      showKey(currentKey());
+    }});
+    msel.addEventListener('change', () => {{
+      mIdx = MONTH_LIST.indexOf(currentKey());
+      showKey(currentKey());
+    }});
+    const prevBtn = document.getElementById(cfg.prev), nextBtn = document.getElementById(cfg.next);
+    prevBtn && prevBtn.addEventListener('click', () => gotoIdx(mIdx - 1));
+    nextBtn && nextBtn.addEventListener('click', () => gotoIdx(mIdx + 1));
   }}
-  function showMonth(key) {{
-    document.querySelectorAll('.mwrap').forEach(w => w.classList.toggle('active', w.dataset.ym === key));
-  }}
-  function currentKey() {{
-    return `${{ysel.value}}-${{String(msel.value).padStart(2, '0')}}`;
-  }}
-  function gotoIdx(idx) {{
-    idx = Math.max(0, Math.min(MONTH_LIST.length - 1, idx));
-    mIdx = idx;
-    const [y, m] = MONTH_LIST[idx].split('-').map(Number);
-    ysel.value = y;
-    populateMonths(y, m);
-    showMonth(MONTH_LIST[idx]);
-  }}
-  ysel.addEventListener('change', () => {{
-    populateMonths(parseInt(ysel.value, 10), parseInt(msel.value, 10));
-    mIdx = MONTH_LIST.indexOf(currentKey());
-    showMonth(currentKey());
-  }});
-  msel.addEventListener('change', () => {{
-    mIdx = MONTH_LIST.indexOf(currentKey());
-    showMonth(currentKey());
-  }});
-  document.getElementById('mprev').addEventListener('click', () => gotoIdx(mIdx - 1));
-  document.getElementById('mnext').addEventListener('click', () => gotoIdx(mIdx + 1));
+  setupYearMonthNav({{ysel: 'ysel', msel: 'msel', prev: 'mprev', next: 'mnext', wrapSel: '#sub-month .mwrap'}});
+  setupYearMonthNav({{ysel: 'tysel', msel: 'tmsel', prev: 'tprev', next: 'tnext', wrapSel: '#sub-term .twrap'}});
   // Woche: mehrere Wochen navigierbar (Pfeile + "Diese Woche")
   (() => {{
-    const wraps = Array.from(document.querySelectorAll('#view-week .wkwrap'));
+    const wraps = Array.from(document.querySelectorAll('#sub-week .wkwrap'));
     if (!wraps.length) return;
     let wi = wraps.findIndex(w => w.classList.contains('active'));
     if (wi < 0) wi = 0;
@@ -1982,6 +2044,24 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     const todayBtn = document.getElementById('wtoday');
     todayBtn && todayBtn.addEventListener('click', () => showWeek(todayIdx));
     showWeek(wi);
+  }})();
+  // Kalender-Filter: Checkboxen blenden Termine/Chips des jeweiligen Kalenders
+  // in Woche/Monat/Terminliste ein oder aus (gemeinsam für alle drei Unterreiter).
+  (() => {{
+    const root = document.getElementById('view-kalender');
+    if (!root) return;
+    const boxes = root.querySelectorAll('.cfbox');
+    function applyCalFilter() {{
+      const hidden = new Set();
+      boxes.forEach(cb => {{ if (!cb.checked) hidden.add(cb.dataset.cal); }});
+      // Nur echte Termin-Elemente filtern, nie die Checkboxen selbst (die tragen
+      // ebenfalls data-cal, damit die Legende die richtige Farbe zeigen kann).
+      root.querySelectorAll('.ev[data-cal], .chip[data-cal], .event[data-cal]').forEach(el => {{
+        el.style.display = hidden.has(el.dataset.cal) ? 'none' : '';
+      }});
+    }}
+    boxes.forEach(cb => cb.addEventListener('change', applyCalFilter));
+    applyCalFilter();
   }})();
   // Cardshows: Monats-Chips
   document.querySelectorAll('#view-shows .fchip').forEach(c => c.addEventListener('click', () => {{
@@ -2198,6 +2278,13 @@ def main():
                 seen_ics.add(u)
                 ics_list_dedup.append(u)
         ics_list = ics_list_dedup
+        # HOLIDAY_EXCLUDE: optionale Liste von Termin-/Feiertagsnamen (eine pro Zeile
+        # oder durch Komma getrennt), die trotz gültigem Kalender-Feed nicht im
+        # Dashboard erscheinen sollen (z.B. für dich irrelevante regionale Feiertage,
+        # die sich über Googles "Feiertag ausblenden" NICHT aus dem iCal-Export entfernen
+        # lassen, da das nur die eigene Google-Kalender-Ansicht betrifft).
+        holiday_exclude_raw = (os.environ.get("HOLIDAY_EXCLUDE") or "").strip()
+        holiday_exclude = [t.strip() for chunk in holiday_exclude_raw.splitlines() for t in chunk.split(",") if t.strip()]
         trello_key = (os.environ.get("TRELLO_KEY") or "").strip()
         trello_token = (os.environ.get("TRELLO_TOKEN") or "").strip()
         anthropic_key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
@@ -2207,8 +2294,9 @@ def main():
             y1, m1 = ym_add(today.year, today.month, MONTH_VIEW_HORIZON_MONTHS + 1)
             start = datetime.combine(date(y0, m0, 1) - timedelta(days=7), datetime.min.time(), TZ)
             end = datetime.combine(date(y1, m1, 1) + timedelta(days=7), datetime.min.time(), TZ)
-            events, cal_meta = fetch_events(ics_list, start, end)
-            print(f"Kalender: {len(events)} Termine geladen ({len(ics_list)} Kalender-Adresse(n))")
+            events, cal_meta = fetch_events(ics_list, start, end, exclude_titles=holiday_exclude)
+            print(f"Kalender: {len(events)} Termine geladen ({len(ics_list)} Kalender-Adresse(n))"
+                  + (f", {len(holiday_exclude)} Titel-Fragment(e) ausgeschlossen" if holiday_exclude else ""))
         else:
             events, cal_meta = [], []
         cardshows, shows_note = fetch_cardshows(today)

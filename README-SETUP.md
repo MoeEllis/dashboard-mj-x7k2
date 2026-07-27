@@ -33,6 +33,7 @@ Secrets anlegen (Name exakt so schreiben) – die ersten drei sind Pflicht, der 
 | `TODOIST_TOKEN` | dein API-Token | Todoist → Einstellungen → **Integrationen** → Reiter **Entwickler** → API-Token kopieren |
 | `ICS_URL` | private iCal-Adresse (dein Hauptkalender) | Google Kalender im Browser → Zahnrad → **Einstellungen** → links unter „Einstellungen für meine Kalender" deinen Kalender anklicken → Abschnitt **„Kalender integrieren"** → **„Privatadresse im iCal-Format"** kopieren |
 | `ICS_URLS` | *(optional)* weitere iCal-Adressen, je eine pro Zeile (oder durch Komma getrennt) | Für zusätzliche Kalender wie „Privat" oder „Feiertage in Deutschland" – siehe „Mehrere Kalender" unten |
+| `HOLIDAY_EXCLUDE` | *(optional)* Termin-/Feiertagsnamen, je einer pro Zeile (oder durch Komma getrennt) | Um bestimmte Termine (z. B. für dich irrelevante regionale Feiertage) dauerhaft auszublenden – siehe „Feiertage/Termine ausblenden" unten |
 | `REFRESH_TOKEN` | *(optional)* Feintoken | Nur für den ⟳-Knopf direkt in der Seite, siehe unten |
 | `TRELLO_KEY` | *(optional)* dein Trello-API-Key | [trello.com/app-key](https://trello.com/app-key) (eingeloggt öffnen) → oben den **Key** kopieren |
 | `TRELLO_TOKEN` | *(optional)* dein Trello-Token | Auf derselben Seite unten auf **„Token"** klicken → Zugriff erlauben → den angezeigten Token kopieren |
@@ -142,20 +143,37 @@ Listen, die auch tatsächlich Karten enthalten, damit es übersichtlich bleibt.
   zusätzlichen Kosten**.
 - **Kalender-Farben:** Jeder Kalender (Standard aus `ICS_URL`, plus alle
   weiteren aus `ICS_URLS`) bekommt automatisch eine eigene feste Farbe –
-  sichtbar als kleiner Punkt vor jedem Termin (Heute, Jahr) bzw. als
-  eingefärbte Kachel (Woche, Monat). Eine Legende mit Kalendernamen und
-  Farbe steht über den Ansichten „Woche", „Monat" und „Jahr". Die
-  Zuordnung Kalender → Farbe bleibt stabil, auch wenn später ein weiterer
-  Kalender dazukommt oder einer kurzzeitig nicht erreichbar ist.
-- **Woche – vor/zurück blättern:** Im Reiter „Woche" mit den Pfeilen links
-  und rechts der Wochenanzeige beliebig weit in vergangene oder zukünftige
-  Wochen blättern; „Diese Woche" springt jederzeit zur aktuellen Woche
-  zurück.
-- **Monat – 5 Jahre im Überblick:** Im Reiter „Monat" zuerst das Jahr,
-  dann den Monat auswählen (statt eines einzigen langen Dropdowns) – so
-  bleiben auch die nächsten 5 Jahre übersichtlich erreichbar. Die
-  Pfeile links/rechts blättern monatsweise weiter, auch über Jahresgrenzen
-  hinweg.
+  sichtbar als kleiner Punkt vor jedem Termin (Übersicht, Terminliste) bzw.
+  als eingefärbte Kachel (Woche, Monat). Die Zuordnung Kalender → Farbe
+  bleibt stabil, auch wenn später ein weiterer Kalender dazukommt oder
+  einer kurzzeitig nicht erreichbar ist.
+- **Reiter „Kalender":** Fasst Woche, Monat und Terminliste (früher „Jahr")
+  als Unterreiter zusammen. Oben in diesem Reiter steht eine Kalender-Filterzeile
+  mit einer Checkbox je verknüpftem Kalender (Farbe + Name) – jeder Kalender
+  lässt sich einzeln ein-/ausblenden, die Auswahl gilt gemeinsam für Woche,
+  Monat und Terminliste und bleibt beim Wechseln zwischen den Unterreitern
+  erhalten. So bleibt die Übersicht auch mit vielen Kalendern übersichtlich.
+- **Woche – vor/zurück blättern:** Mit den Pfeilen links und rechts der
+  Wochenanzeige beliebig weit in vergangene oder zukünftige Wochen blättern;
+  „Diese Woche" springt jederzeit zur aktuellen Woche zurück.
+- **Monat – 5 Jahre im Überblick:** Zuerst das Jahr, dann den Monat auswählen
+  (statt eines einzigen langen Dropdowns) – so bleiben auch die nächsten
+  5 Jahre übersichtlich erreichbar. Die Pfeile links/rechts blättern
+  monatsweise weiter, auch über Jahresgrenzen hinweg.
+- **Terminliste (früher „Jahr"):** Zeigt nicht mehr nur pauschal die nächsten
+  12 Monate, sondern nutzt dieselbe Jahr-/Monatsauswahl wie „Monat" (Vormonat
+  bis +5 Jahre) – lässt sich also gezielt auf jeden einzelnen Monat springen,
+  dort dann als chronologische Liste statt als Kalenderraster.
+- **Feiertage/Termine ausblenden:** Ein Feiertag (oder Termin) über den
+  Papierkorb in Google Kalender „ausblenden" wirkt nur auf deine eigene
+  Google-Kalender-Ansicht – die von dort exportierte iCal-Adresse liefert
+  weiterhin den vollständigen, unveränderten Kalender, daher taucht so
+  ein ausgeblendeter Feiertag trotzdem im Dashboard auf. Abhilfe: den
+  (Teil-)Namen des Termins ins Secret `HOLIDAY_EXCLUDE` eintragen (z. B.
+  `Fronleichnam`, `Mariä Himmelfahrt`) – einen pro Zeile oder durch Komma
+  getrennt, Groß-/Kleinschreibung egal. Das Dashboard filtert dann bei
+  jedem Lauf alle Termine heraus, deren Titel diesen Text enthält – egal
+  aus welchem der verknüpften Kalender sie stammen.
 - **Fehlersuche:** Wenn die Seite nicht aktualisiert, im Reiter **Actions**
   den letzten Lauf anklicken – die Fehlermeldung dort sagt meist direkt,
   welches Secret fehlt oder falsch ist. Einfach Claude zeigen.
