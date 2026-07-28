@@ -41,6 +41,17 @@ jobs:
           TRELLO_KEY: ${{ secrets.TRELLO_KEY }}
           TRELLO_TOKEN: ${{ secrets.TRELLO_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PODCAST_MODEL: ${{ secrets.PODCAST_MODEL }}
+          # --- Markt: Releases-Einordnung (alle optional, sinnvolle Vorgaben im Skript) ---
+          OWN_BRANDS: ${{ secrets.OWN_BRANDS }}
+          WATCH_LEAGUES: ${{ secrets.WATCH_LEAGUES }}
+          # --- Markt: Händler-Monitor (alle optional) ---
+          SHOP_WATCHLIST: ${{ secrets.SHOP_WATCHLIST }}
+          SHOP_PROBE: ${{ secrets.SHOP_PROBE }}
+          SHOP_SWEEP_KEYWORDS: ${{ secrets.SHOP_SWEEP_KEYWORDS }}
+          # --- Markt: Branchen- und Lizenz-Radar (alle optional) ---
+          INDUSTRY_FEEDS: ${{ secrets.INDUSTRY_FEEDS }}
+          INDUSTRY_KEYWORDS: ${{ secrets.INDUSTRY_KEYWORDS }}
         run: python build_dashboard.py
 
       - name: Veröffentlichen (nur bei Änderung)
