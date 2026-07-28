@@ -72,7 +72,14 @@ WMO_CODES = {
 # News: welche Quellen zählen als "Sport" (Rest fällt unter "Weitere Themen")
 NEWS_SPORT_SOURCES = {"kicker", "LigaInsider"}
 
-# --- Markt · Händler-Monitor (Preis + Verfügbarkeit) ------------------------
+# --- Markt · Händler-Monitor (STILLGELEGT) ----------------------------------
+# STILLGELEGT am 28.07.2026: Der Unterreiter "Händler" ist aus dem Dashboard
+# entfernt, weil die erreichbaren Shops nicht die relevanten Händler waren.
+# Der komplette Unterbau (Konstanten, Auslese-Verfahren, fetch_shopwatch) bleibt
+# absichtlich erhalten und getestet, damit die Funktion mit einer passenden
+# Shop-Liste jederzeit wieder eingeschaltet werden kann. Sie wird derzeit
+# NICHT aufgerufen – es entstehen keine Abrufe und keine Laufzeit.
+#
 # Drei Auslese-Verfahren decken alle geprüften deutschen Trading-Card-Shops ab:
 #   1. Shopify: an eine Produkt-Adresse angehängtes ".js" liefert JSON mit Preis
 #      (in Cent!) und Lagerstatus. Zusätzlich gibt es /products.json als
@@ -106,9 +113,9 @@ SHOP_HOST_DELAY = {"collect-it.de": 20.0}   # robots.txt bittet dort um Crawl-de
 INDUSTRY_FEEDS_DEFAULT = [
     ("Cardlines", "https://cardlines.com/feed/"),
     ("Cardboard Connection", "https://www.cardboardconnection.com/feed/"),
-    ("Sports Collectors Daily", "https://www.sportscollectorsdaily.com/feed/"),
-    ("CrispyCards (DE)", "https://crispycards.de/blogs/news.atom"),
-    ("Kartenfan (DE)", "https://kartenfan.de/feed/"),
+    # Entfernt am 28.07.2026: Sports Collectors Daily (lieferte keine
+    # relevanten Meldungen), CrispyCards (DE) und Kartenfan (DE) (veraltete
+    # Meldungen). Über das Secret INDUSTRY_FEEDS jederzeit wieder ergänzbar.
     ("Google News (int.)",
      "https://news.google.com/rss/search?q=%22trading+cards%22+(Panini+OR+Topps+OR+Fanatics)"
      "&hl=en-US&gl=US&ceid=US:en"),
@@ -124,6 +131,7 @@ INDUSTRY_KEYWORDS_DEFAULT = [
 ]
 INDUSTRY_ITEMS_PER_FEED = 12
 INDUSTRY_DIGEST_MAX = 45        # so viele Überschriften gehen maximal in den KI-Aufruf
+INDUSTRY_DIGEST_CACHE_V = 2     # 2 = Kurzfassung mit Quell-Verweisen je Zeile
 
 # --- Markt · Releases: eigene Marken, Konfiguration, Liga/Lizenz -----------
 OWN_BRANDS_DEFAULT = ["Panini"]
@@ -1443,62 +1451,97 @@ def fetch_industry(feeds, keywords):
     return sources
 
 
+def _parse_digest_lines(raw, refs):
+    """Antwort des Modells in Zeilen zerlegen: Sachverhalt, Begründung und die
+    Nummern der zugrunde liegenden Meldungen. Die Nummern werden hier zu
+    echten Verweisen (Name, Titel, Adresse) aufgelöst; fehlen oder stimmen sie
+    nicht, bleibt die Zeile einfach unverlinkt statt falsch verlinkt."""
+    lines = []
+    for ln in (raw or "").splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        parts = [p.strip() for p in ln.split("::")]
+        idx_part = ""
+        # Der Nummern-Teil steht hinten und enthält nur Zahlen und Trennzeichen.
+        if len(parts) >= 2 and re.fullmatch(r"[\d\s,;/\.\+&\-]*\d[\d\s,;/\.\+&\-]*", parts[-1] or ""):
+            idx_part = parts.pop()
+        head = re.sub(r"^[\-•*\d\.\)\s]+", "", parts[0]).strip(" –—-")
+        why = " ".join(p for p in parts[1:] if p).strip()
+        if not head:
+            continue
+        links, seen = [], set()
+        for num in re.findall(r"\d+", idx_part):
+            i = int(num) - 1
+            if 0 <= i < len(refs) and i not in seen:
+                seen.add(i)
+                r = refs[i]
+                if r.get("url"):
+                    links.append({"name": r.get("name", ""), "title": r.get("title", ""),
+                                  "url": r["url"]})
+            if len(links) >= 3:
+                break
+        lines.append({"head": head, "why": why, "links": links})
+    return lines
+
+
 def summarize_industry(sources, api_key, today):
     """Ein Haiku-Aufruf pro Kalendertag, datumsgeschlüsselt in cache/industry.json.
     Mehrfache Dashboard-Läufe am selben Tag kosten dadurch nichts zusätzlich."""
     key_today = today.isoformat()
     cache = load_cache("industry") or {}
-    if cache.get("date") == key_today and cache.get("lines"):
+    # Version 2 führt je Zeile die Quell-Verweise ("links") mit. Ein älterer
+    # Zwischenspeicher ohne diese Angabe wird bewusst NICHT weiterverwendet,
+    # sonst blieben die Zeilen bis morgen unverlinkt.
+    cache_ok = cache.get("v") == INDUSTRY_DIGEST_CACHE_V
+    if cache_ok and cache.get("date") == key_today and cache.get("lines"):
         return cache["lines"], None
-    titles = []
+    # Nummerierte Liste: das Modell nennt später nur die Nummern, das Auflösen
+    # zu Titel und Adresse macht der Code – dadurch keine unscharfe
+    # Titel-Zuordnung und keine erfundenen Adressen.
+    refs = []
     for s in sources:
         for it in s.get("items", []):
-            titles.append(f'{it["title"]} [{s["name"]}]')
-    titles = titles[:INDUSTRY_DIGEST_MAX]
+            refs.append({"name": s.get("name", ""), "title": it.get("title", ""),
+                         "url": it.get("url", "")})
+    refs = refs[:INDUSTRY_DIGEST_MAX]
     if not api_key:
         return None, "Kein ANTHROPIC_API_KEY hinterlegt – Kurzfassung übersprungen."
-    if not titles:
+    if not refs:
         return None, "Keine relevanten Branchenmeldungen gefunden."
     import requests
     prompt = (
         "Du berichtest einem Produktmanager von Panini Deutschland, der für den Hobby-Bereich "
         "des Trading-Card-Marktes verantwortlich ist. Hier sind aktuelle Schlagzeilen aus "
-        "Branchenmedien:\n\n"
-        + "\n".join(f"- {t}" for t in titles)
+        "Branchenmedien, jede mit einer Nummer:\n\n"
+        + "\n".join(f'[{i}] {r["title"]} [{r["name"]}]' for i, r in enumerate(refs, 1))
         + "\n\nFasse daraus die 4 bis 6 wichtigsten Entwicklungen zusammen. Lizenz-, Rechte- und "
           "Herstellerthemen (Panini, Topps, Fanatics, Upper Deck, Ligen und Verbände) zuerst, danach "
           "Produkt- und Markttrends. Schreibe auf Deutsch. Gib pro Zeile GENAU dieses Format aus:\n"
-          "Kurzer Sachverhalt :: warum das für Panini Deutschland im Hobby-Bereich relevant ist\n"
-          "Keine Nummerierung, keine Aufzählungszeichen, keine Einleitung, keine Leerzeilen. "
-          "Wenn ein Thema nur am Rand relevant ist, lass es weg."
+          "Kurzer Sachverhalt :: warum das für Panini Deutschland im Hobby-Bereich relevant ist :: 3, 7\n"
+          "Der dritte Teil sind die Nummern der Schlagzeilen, auf die sich die Zeile stützt "
+          "(mindestens eine, höchstens drei, wichtigste zuerst, nur Zahlen aus der Liste oben). "
+          "Keine Nummerierung am Zeilenanfang, keine Aufzählungszeichen, keine Einleitung, "
+          "keine Leerzeilen. Wenn ein Thema nur am Rand relevant ist, lass es weg."
     )
     try:
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json={"model": PODCAST_MODEL, "max_tokens": 700, "messages": [{"role": "user", "content": prompt}]},
+            json={"model": PODCAST_MODEL, "max_tokens": 800, "messages": [{"role": "user", "content": prompt}]},
             timeout=90)
         r.raise_for_status()
         data = r.json()
         raw = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
-        lines = []
-        for ln in raw.splitlines():
-            ln = re.sub(r"^[\-•*\d\.\)\s]+", "", ln).strip()
-            if not ln:
-                continue
-            if "::" in ln:
-                head, why = ln.split("::", 1)
-                lines.append({"head": head.strip(" –—-"), "why": why.strip()})
-            else:
-                lines.append({"head": ln, "why": ""})
+        lines = _parse_digest_lines(raw, refs)
         if not lines:
             raise ValueError("leere Antwort")
-        save_cache("industry", {"date": key_today, "lines": lines})
+        save_cache("industry", {"v": INDUSTRY_DIGEST_CACHE_V, "date": key_today, "lines": lines})
         print(f"Branchen-Radar: neu berechnet für heute ({len(lines)} Punkte).")
         return lines, None
     except Exception as e:
         print(f"Hinweis: Branchen-Radar fehlgeschlagen ({e}).")
-        old = cache.get("lines")
+        old = cache.get("lines") if cache_ok else None
         return old, ("Kurzfassung von " + cache.get("date", "") if old else "Kurzfassung heute nicht verfügbar.")
 
 
@@ -1687,64 +1730,6 @@ def testdata(today):
                   "Kicker berichtet über anstehende Kaderentscheidungen vor dem Saisonstart."],
         "andere": ["ZDFheute: Beispielhafte Kernthemen des Tages aus den Testdaten."],
     }
-    # --- Markt: Händler-Monitor (Preisverlauf über die letzten Tage) ---
-    def _hist(prices, avails):
-        n = len(prices)
-        return [[(today - timedelta(days=n - 1 - i)).isoformat(), prices[i], avails[i]]
-                for i in range(n)]
-
-    shopwatch = {
-        "https://deichcards.de/products/panini-bundesliga-2025-26-hobby-box": {
-            "name": "Panini Bundesliga 2025/26 Hobby Box", "price": 109.9, "currency": "EUR",
-            "available": True, "via": "Shopify", "shop": "deichcards.de", "source": "watch",
-            "url": "https://deichcards.de/products/panini-bundesliga-2025-26-hobby-box",
-            "checked": today.strftime("%d.%m.%Y") + " 08:12", "first_seen": (today - timedelta(days=6)).isoformat(),
-            "prev_price": 119.9, "prev_available": True,
-            "hist": _hist([119.9, 119.9, 124.9, 119.9, 114.9, 114.9, 109.9], [1, 1, 0, 1, 1, 1, 1]),
-        },
-        "https://crispycards.de/products/topps-chrome-bundesliga-hobby": {
-            "name": "Topps Chrome Bundesliga 2025/26 Hobby", "price": 149.0, "currency": "EUR",
-            "available": False, "via": "Shopify", "shop": "crispycards.de", "source": "watch",
-            "url": "https://crispycards.de/products/topps-chrome-bundesliga-hobby",
-            "checked": today.strftime("%d.%m.%Y") + " 08:12", "first_seen": (today - timedelta(days=5)).isoformat(),
-            "prev_price": 139.0, "prev_available": True,
-            "hist": _hist([139.0, 139.0, 139.0, 144.0, 144.0, 149.0], [1, 1, 1, 1, 1, 0]),
-        },
-        "https://collect-it.de/panini-prizm-bundesliga-hobby-box": {
-            "name": "Panini Prizm Bundesliga Hobby Box", "price": 189.95, "currency": "EUR",
-            "available": True, "via": "JSON-LD", "shop": "collect-it.de", "source": "watch",
-            "url": "https://collect-it.de/panini-prizm-bundesliga-hobby-box",
-            "checked": today.strftime("%d.%m.%Y") + " 08:13", "first_seen": (today - timedelta(days=9)).isoformat(),
-            "prev_price": 189.95, "prev_available": True,
-            "hist": _hist([199.95, 199.95, 194.95, 189.95, 189.95], [1, 1, 1, 1, 1]),
-        },
-        "https://inside-the-box.de/panini-donruss-bundesliga-blaster": {
-            "name": "Panini Donruss Bundesliga Blaster Box", "price": 24.99, "currency": "EUR",
-            "available": None, "via": "Open Graph", "shop": "inside-the-box.de", "source": "watch",
-            "url": "https://inside-the-box.de/panini-donruss-bundesliga-blaster",
-            "checked": today.strftime("%d.%m.%Y") + " 08:14", "first_seen": (today - timedelta(days=3)).isoformat(),
-            "prev_price": 24.99, "prev_available": None,
-            "hist": _hist([26.99, 24.99, 24.99], [None, None, None]),
-        },
-        "https://trading-card-corner.de/products/panini-select-bundesliga": {
-            "name": "Panini Select Bundesliga 2025/26 Box", "price": 94.5, "currency": "EUR",
-            "available": True, "via": "Shopify (Katalog)", "shop": "trading-card-corner.de",
-            "source": "sweep", "url": "https://trading-card-corner.de/products/panini-select-bundesliga",
-            "checked": today.strftime("%d.%m.%Y") + " 08:15", "first_seen": (today - timedelta(days=2)).isoformat(),
-            "prev_price": 94.5, "prev_available": True,
-            "hist": _hist([99.0, 94.5], [1, 1]),
-        },
-        "https://cardport.de/topps-merlin-premier-league-hobby": {
-            "name": "Topps Merlin Premier League Hobby Box", "price": 129.0, "currency": "EUR",
-            "available": True, "via": "JSON-LD", "shop": "cardport.de", "source": "sweep",
-            "url": "https://cardport.de/topps-merlin-premier-league-hobby", "stale": True,
-            "checked": (today - timedelta(days=2)).strftime("%d.%m.%Y") + " 06:10",
-            "first_seen": (today - timedelta(days=12)).isoformat(),
-            "prev_price": 129.0, "prev_available": True,
-            "hist": _hist([135.0, 129.0, 129.0], [1, 1, 1])[:-1],
-        },
-    }
-
     # --- Markt: Branchen- & Lizenz-Radar ---
     def _news(t, u, d):
         return {"title": t, "url": u, "date": (today - timedelta(days=d)).isoformat()}
@@ -1762,40 +1747,50 @@ def testdata(today):
             _news("Grading backlog at PSA grows ahead of World Cup product wave",
                   "https://www.cardboardconnection.com/example-4", 2),
         ]},
-        {"name": "Sports Collectors Daily", "home": "https://www.sportscollectorsdaily.com", "total": 10,
+        {"name": "Google News (int.)", "home": "https://news.google.com", "total": 20,
          "note": "Stand vom letzten erfolgreichen Abruf", "items": [
             _news("Hobby box prices climb as breakers dominate release-day demand",
-                  "https://www.sportscollectorsdaily.com/example-5", 3),
-        ]},
-        {"name": "CrispyCards (DE)", "home": "https://crispycards.de", "total": 8, "note": None, "items": [
-            _news("Neue Panini Sammelbilder-Kollektion zur WM 2026 angekündigt",
-                  "https://crispycards.de/blogs/news/example-6", 1),
-        ]},
-        {"name": "Kartenfan (DE)", "home": "https://kartenfan.de", "total": 9, "note": None, "items": [
-            _news("Lizenzstreit um Bundesliga-Rechte: DFL prüft neue Vergabe",
-                  "https://kartenfan.de/example-7", 2),
+                  "https://news.google.com/example-5", 3),
         ]},
         {"name": "Google News (DE)", "home": "https://news.google.com", "total": 20, "note": None, "items": [
+            _news("Lizenzstreit um Bundesliga-Rechte: DFL prüft neue Vergabe",
+                  "https://news.google.com/example-7", 2),
             _news("Trading Cards als Anlageklasse: Sammelkartenmarkt wächst weiter",
                   "https://news.google.com/example-8", 0),
         ]},
     ]
+    # Jede Zeile der Kurzfassung trägt die Meldungen, aus denen sie stammt –
+    # daraus werden im Dashboard die Verweise gebaut.
+    def _src(name, title, url):
+        return {"name": name, "title": title, "url": url}
+
     industry_digest = [
         {"head": "Fanatics verlängert eine exklusive Football-Lizenz",
-         "why": "Verengt den Lizenzmarkt weiter – für eigene Fußballprodukte zählt jetzt vor allem die Absicherung der Bundesliga- und WM-Rechte."},
+         "why": "Verengt den Lizenzmarkt weiter – für eigene Fußballprodukte zählt jetzt vor allem die Absicherung der Bundesliga- und WM-Rechte.",
+         "links": [_src("Cardlines", "Fanatics extends exclusive licensing deal for football trading cards",
+                        "https://cardlines.com/example-1")]},
         {"head": "DFL prüft eine Neuvergabe der Bundesliga-Sammelkartenrechte",
-         "why": "Direkt relevant für die Planung der Hobby-Linie 2026/27; frühzeitige Gespräche und ein Szenario ohne Exklusivität wären sinnvoll."},
+         "why": "Direkt relevant für die Planung der Hobby-Linie 2026/27; frühzeitige Gespräche und ein Szenario ohne Exklusivität wären sinnvoll.",
+         "links": [_src("Google News (DE)", "Lizenzstreit um Bundesliga-Rechte: DFL prüft neue Vergabe",
+                        "https://news.google.com/example-7"),
+                   _src("Cardlines", "Panini launches new Bundesliga hobby configuration for 2026",
+                        "https://cardlines.com/example-2")]},
         {"head": "Topps veröffentlicht Checkliste und Termin für Champions League 2026",
-         "why": "Setzt das Zeitfenster für den eigenen UCL-Launch – der Hobby-Release sollte nicht in dieselbe Woche fallen."},
+         "why": "Setzt das Zeitfenster für den eigenen UCL-Launch – der Hobby-Release sollte nicht in dieselbe Woche fallen.",
+         "links": [_src("Cardboard Connection", "2026 Topps Champions League checklist and release date revealed",
+                        "https://www.cardboardconnection.com/example-3")]},
         {"head": "Rückstau bei PSA vor der WM-Produktwelle",
-         "why": "Grading-Kapazität wird zum Nadelöhr für den Sekundärmarkt; ein Grading-Partnerangebot zum Launch könnte sich differenzierend auswirken."},
+         "why": "Grading-Kapazität wird zum Nadelöhr für den Sekundärmarkt; ein Grading-Partnerangebot zum Launch könnte sich differenzierend auswirken.",
+         "links": [_src("Cardboard Connection", "Grading backlog at PSA grows ahead of World Cup product wave",
+                        "https://www.cardboardconnection.com/example-4")]},
         {"head": "Hobby-Box-Preise steigen, Breaker dominieren den Release-Tag",
-         "why": "Spricht für strengere Allokation an den Fachhandel und für eine Konfiguration, die Einzelsammler gegenüber Breakern nicht benachteiligt."},
+         "why": "Spricht für strengere Allokation an den Fachhandel und für eine Konfiguration, die Einzelsammler gegenüber Breakern nicht benachteiligt.",
+         "links": []},
     ]
 
     events.sort(key=lambda e: (e["date"], e["time"]))
     return (tasks, 2, events, shows, news, releases, trello, podcast, weather, day_focus,
-            news_digest, cal_meta, shopwatch, industry, industry_digest)
+            news_digest, cal_meta, industry, industry_digest)
 
 
 # ------------------------------------------------------------------ HTML ---
@@ -1905,7 +1900,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
                trello=None, trello_note=None, podcast=None, podcast_note=None,
                weather=None, weather_note=None, day_focus=None, day_focus_note=None,
                news_digest=None, cal_meta=None,
-               shopwatch=None, shopwatch_note=None, industry=None, industry_note=None,
+               industry=None, industry_note=None,
                industry_digest=None, digest_note=None, watch_leagues=None):
     releases = releases or []
     trello = trello or []
@@ -1913,7 +1908,6 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     weather = weather or []
     news_digest = news_digest or {}
     cal_meta = cal_meta or []
-    shopwatch = shopwatch or {}
     industry = industry or []
     watch_leagues = watch_leagues if watch_leagues is not None else list(WATCH_LEAGUES_DEFAULT)
     now = datetime.now(TZ)
@@ -2216,21 +2210,32 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
             name = f'<a href="{esc(r["url"])}" target="_blank" rel="noopener">{name}</a>'
         cl = (f' <a class="cl" href="{esc(r["checklist"])}" target="_blank" rel="noopener">✓ Checkliste</a>'
               if r.get("checklist") else "")
-        cat = f'<span class="rel-cat">{esc(r["category"])}</span>' if r.get("category") else ""
         side = r.get("side") or "Wettbewerb"
         cfg = r.get("config") or "unklar"
         lg = r.get("league") or "Sonstige"
-        cfg_badge = (f'<span class="cfg cfg-{cfg.lower()}">{esc(cfg)}</span>'
-                     if cfg != "unklar" else '<span class="cfg cfg-unklar">?</span>')
-        lg_badge = (f'<span class="lg{" lg-watch" if lg.casefold() in watch_norm else ""}" '
-                    f'title="Nach {esc(lg)} filtern">{esc(lg)}</span>')
+        # Bewusst ruhig gehalten (Überarbeitung 28.07.2026): Nur "Hobby" bekommt
+        # eine farbige Pille, Retail und Sticker stehen als graue Kleinschrift
+        # daneben, bei "unklar" steht gar nichts mehr (früher ein "?"). Die
+        # Kategorie-Angabe ist ganz entfallen – sie hat die Liga/Lizenz fast
+        # immer nur wiederholt. Gefiltert werden kann weiterhin nach allem,
+        # die Werte stehen unverändert in den data-Attributen.
+        if cfg == "Hobby":
+            cfg_badge = '<span class="cfg cfg-hobby">Hobby</span>'
+        elif cfg == "unklar":
+            cfg_badge = ""
+        else:
+            cfg_badge = f'<span class="cfgq">{esc(cfg)}</span>'
+        # "Sonstige" als Badge wäre reine Füllung – dann bleibt die Zeile leer.
+        lg_badge = "" if lg == "Sonstige" else (
+            f'<span class="lg{" lg-watch" if lg.casefold() in watch_norm else ""}" '
+            f'title="Nach {esc(lg)} filtern">{esc(lg)}</span>')
         return (f'<div class="rel{" past" if past else ""}{" own" if r.get("own") else ""}" '
                 f'data-maker="{esc(r["maker"])}" '
                 f'data-cat="{esc(r.get("category") or "")}" data-month="{mkey}" '
                 f'data-side="{esc(side)}" data-config="{esc(cfg)}" data-league="{esc(lg)}">'
                 f'<span class="rel-date">{dtxt}</span>'
                 f'<span class="mk" title="Nach {esc(r["maker"])} filtern">{esc(r["maker"])}</span>'
-                f'<span class="rel-name">{name}</span>{cfg_badge}{lg_badge}{cat}{cl}</div>')
+                f'<span class="rel-name">{name}</span>{cfg_badge}{lg_badge}{cl}</div>')
 
     rel_month_chips, rel_parts, cur = [], [], None
     for r in rel_upcoming:
@@ -2277,19 +2282,27 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     league_chips = "".join(
         f'<button class="fchip{" watch" if l.casefold() in watch_norm else ""}" '
         f'data-dim="league" data-v="{esc(l)}">{esc(l)}</button>' for l in rel_leagues)
+    # Sichtbar bleiben nur die zwei Filterzeilen, die am häufigsten gebraucht
+    # werden. Die vier feineren Filter liegen hinter "Weitere Filter" – sie
+    # funktionieren unverändert, drängen sich aber nicht mehr auf.
     rel_filters_html = f'''
     <div class="filterrow"><span class="flabel">Sicht:</span><button class="fchip active" data-dim="side" data-v="">Alle</button>{side_chips}</div>
-    <div class="filterrow"><span class="flabel">Konfiguration:</span><button class="fchip active" data-dim="config" data-v="">Alle</button>{config_chips}</div>
-    <div class="filterrow"><span class="flabel">Liga/Lizenz:</span><button class="fchip active" data-dim="league" data-v="">Alle</button>{league_chips}</div>
-    <div class="filterrow"><span class="flabel">Hersteller:</span><button class="fchip active" data-dim="maker" data-v="">Alle</button>{maker_chips}</div>
-    <div class="filterrow"><span class="flabel">Kategorie:</span><button class="fchip active" data-dim="cat" data-v="">Alle</button>{cat_chips}</div>
-    <div class="filterrow"><span class="flabel">Monat:</span><button class="fchip active" data-dim="month" data-v="">Alle</button>{"".join(rel_month_chips)}</div>'''
+    <div class="filterrow"><span class="flabel">Monat:</span><button class="fchip active" data-dim="month" data-v="">Alle</button>{"".join(rel_month_chips)}</div>
+    <details class="morefilters"><summary>Weitere Filter</summary>
+      <div class="filterrow"><span class="flabel">Konfiguration:</span><button class="fchip active" data-dim="config" data-v="">Alle</button>{config_chips}</div>
+      <div class="filterrow"><span class="flabel">Liga/Lizenz:</span><button class="fchip active" data-dim="league" data-v="">Alle</button>{league_chips}</div>
+      <div class="filterrow"><span class="flabel">Hersteller:</span><button class="fchip active" data-dim="maker" data-v="">Alle</button>{maker_chips}</div>
+      <div class="filterrow"><span class="flabel">Kategorie:</span><button class="fchip active" data-dim="cat" data-v="">Alle</button>{cat_chips}</div>
+    </details>'''
     rel_stat = (f"{len(rel_upcoming)} kommende · {len(rel_tbd)} ohne Termin · {len(rel_past)} vergangene"
                 if releases else "")
     releases_note = releases_note or ""
     rel_body = "".join(rel_parts) if rel_parts else '<div class="empty">Keine kommenden Releases gefunden.</div>'
 
-    # --- Vorschlag 6: Wettbewerbs-Kennzahlen über 30/60/90 Tage ------------
+    # --- Vorschlag 6: Wettbewerbs-Sicht, bewusst knapp ---------------------
+    # Überarbeitung 28.07.2026: Die drei Kennzahlen-Karten (30/60/90 Tage) sind
+    # durch EINE Textzeile über 90 Tage ersetzt. Sie sagt dasselbe, drängt die
+    # Release-Liste aber nicht mehr aus dem sichtbaren Bereich.
     def _rel_window(days):
         end = (today + timedelta(days=days)).isoformat()
         win = [r for r in rel_upcoming if r["date"] <= end]
@@ -2298,22 +2311,19 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
         watched = sum(1 for r in win if (r.get("league") or "").casefold() in watch_norm)
         return len(win), own, len(win) - own, hobby, watched
 
-    rel_cards = []
-    for days in (30, 60, 90):
-        n, own, comp, hobby, watched = _rel_window(days)
-        share = f"{round(own * 100 / n)} %" if n else "–"
-        rel_cards.append(
-            f'<div class="wcard"><div class="wcard-h">Nächste {days} Tage</div>'
-            f'<div class="wcard-big">{n}</div>'
-            f'<div class="wcard-sub">Releases insgesamt</div>'
-            f'<div class="wcard-rows">'
-            f'<span><b>{own}</b> eigen</span><span><b>{comp}</b> Wettbewerb</span>'
-            f'<span><b>{share}</b> eigener Anteil</span>'
-            f'<span><b>{hobby}</b> Hobby</span>'
-            f'<span><b>{watched}</b> in beobachteten Ligen</span>'
-            f'</div></div>')
+    n90, own90, comp90, hobby90, watch90 = _rel_window(90)
+    if n90:
+        rel_sum_html = (
+            '<div class="relsum"><b>Nächste 90 Tage:</b> '
+            f'{n90} {"Release" if n90 == 1 else "Releases"} · '
+            f'{own90} eigen, {comp90} Wettbewerb · {hobby90} Hobby · '
+            f'{watch90} in beobachteten Ligen</div>')
+    else:
+        rel_sum_html = ('<div class="relsum"><b>Nächste 90 Tage:</b> '
+                        'keine Releases mit Termin.</div>')
     # Bevorstehende Wettbewerbs-Releases in den beobachteten Ligen, die als
-    # Terminkonflikt in Frage kommen
+    # Terminkonflikt in Frage kommen. Zugeklappt, damit sie die Liste nicht
+    # mehr überdeckt – ein Klick öffnet sie.
     rel_conflicts = [r for r in rel_upcoming
                      if not r.get("own")
                      and (r.get("league") or "").casefold() in watch_norm
@@ -2326,127 +2336,37 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
             f'<span class="rv-lg">{esc(r.get("league") or "")}</span>'
             f'<span class="rv-cfg">{esc(r.get("config") or "")}</span></li>' for r in rel_conflicts)
         rel_conflict_html = (
-            '<div class="rivalbox"><h3 class="ygroup">Wettbewerbs-Releases in beobachteten Ligen '
-            '(nächste 90 Tage)</h3><ul class="rivallist">' + rows + '</ul></div>')
+            '<details class="rivalbox"><summary>Wettbewerb in beobachteten Ligen · '
+            f'nächste 90 Tage ({len(rel_conflicts)})</summary>'
+            f'<ul class="rivallist">{rows}</ul></details>')
     else:
-        rel_conflict_html = ('<div class="rivalbox"><div class="empty">Keine Wettbewerbs-Releases in den '
-                             'beobachteten Ligen in den nächsten 90 Tagen.</div></div>')
-    rel_overview_html = f'<div class="wgrid">{"".join(rel_cards)}</div>{rel_conflict_html}'
-
-    # --- Vorschlag 4: Händler-Monitor -------------------------------------
-    shop_items = sorted((shopwatch or {}).values(),
-                        key=lambda r: (0 if r.get("source") == "watch" else 1,
-                                       r.get("shop") or "", (r.get("name") or "").lower()))
-
-    def _hist_price(rec, days_back):
-        """Preis von vor N Tagen (nächstgelegener Messpunkt, der nicht neuer ist)."""
-        target = (today - timedelta(days=days_back)).isoformat()
-        best = None
-        for h in rec.get("hist") or []:
-            if h[0] <= target and h[1] is not None:
-                best = h[1]
-        return best
-
-    def _spark(rec):
-        """Kleine Inline-SVG-Kurve des Preisverlaufs – ohne externe Bibliothek."""
-        pts = [h[1] for h in (rec.get("hist") or []) if h[1] is not None]
-        if len(pts) < 2:
-            return '<span class="spark-none">–</span>'
-        lo, hi = min(pts), max(pts)
-        span = (hi - lo) or 1.0
-        w, hgt = 92, 24
-        step = w / (len(pts) - 1)
-        coords = " ".join(f"{i * step:.1f},{hgt - 2 - (p - lo) / span * (hgt - 4):.1f}"
-                          for i, p in enumerate(pts))
-        last_x = (len(pts) - 1) * step
-        last_y = hgt - 2 - (pts[-1] - lo) / span * (hgt - 4)
-        trend = "up" if pts[-1] > pts[0] else ("down" if pts[-1] < pts[0] else "flat")
-        return (f'<svg class="spark spark-{trend}" viewBox="0 0 {w} {hgt}" width="{w}" height="{hgt}" '
-                f'preserveAspectRatio="none" aria-hidden="true">'
-                f'<polyline points="{coords}" fill="none" stroke="currentColor" stroke-width="1.6" '
-                f'stroke-linejoin="round" stroke-linecap="round"/>'
-                f'<circle cx="{last_x:.1f}" cy="{last_y:.1f}" r="2.2" fill="currentColor"/></svg>')
-
-    def _eur(v):
-        return ("%.2f" % v).replace(".", ",") + " €" if isinstance(v, (int, float)) else "–"
-
-    def _delta(now_p, then_p):
-        if not isinstance(now_p, (int, float)) or not isinstance(then_p, (int, float)) or then_p == 0:
-            return '<span class="dl dl-flat">–</span>'
-        diff = now_p - then_p
-        if abs(diff) < 0.005:
-            return '<span class="dl dl-flat">±0</span>'
-        pct = diff * 100 / then_p
-        cls = "dl-up" if diff > 0 else "dl-down"
-        arrow = "▲" if diff > 0 else "▼"
-        return (f'<span class="dl {cls}">{arrow} {("%.2f" % abs(diff)).replace(".", ",")} € '
-                f'<em>({pct:+.0f} %)</em></span>')
-
-    shop_rows, shop_hosts = [], sorted({r.get("shop") or "" for r in shop_items if r.get("shop")})
-    for r in shop_items:
-        prices = [h[1] for h in (r.get("hist") or []) if h[1] is not None]
-        lo = min(prices) if prices else None
-        hi = max(prices) if prices else None
-        av = r.get("available")
-        if av is True:
-            av_html, av_key = '<span class="av av-yes">verfügbar</span>', "ja"
-        elif av is False:
-            av_html, av_key = '<span class="av av-no">ausverkauft</span>', "nein"
-        else:
-            av_html, av_key = '<span class="av av-unk">unbekannt</span>', "unbekannt"
-        flip = ""
-        if r.get("prev_available") is not None and av is not None and av != r.get("prev_available"):
-            flip = ('<span class="flip">wieder da</span>' if av
-                    else '<span class="flip flip-out">neu ausverkauft</span>')
-        stale = '<span class="stale" title="Beim letzten Abruf nicht gefunden">nicht gefunden</span>' if r.get("stale") else ""
-        name = esc(r.get("name") or r.get("url") or "")
-        if r.get("url"):
-            name = f'<a href="{esc(r["url"])}" target="_blank" rel="noopener">{name}</a>'
-        shop_rows.append(
-            f'<div class="sw" data-shop="{esc(r.get("shop") or "")}" data-av="{av_key}" '
-            f'data-src="{esc(r.get("source") or "")}">'
-            f'<div class="sw-main"><span class="sw-shop">{esc(r.get("shop") or "")}</span>'
-            f'<span class="sw-name">{name}</span>{flip}{stale}</div>'
-            f'<div class="sw-num"><span class="sw-price">{_eur(r.get("price"))}</span>'
-            f'<span class="sw-d">{_delta(r.get("price"), _hist_price(r, 1))}<em class="sw-dl">1 Tag</em></span>'
-            f'<span class="sw-d">{_delta(r.get("price"), _hist_price(r, 7))}<em class="sw-dl">7 Tage</em></span>'
-            f'<span class="sw-mm">min {_eur(lo)} · max {_eur(hi)}</span>'
-            f'{_spark(r)}{av_html}</div>'
-            f'<div class="sw-meta">{esc(r.get("via") or "")} · zuletzt geprüft {esc(r.get("checked") or "–")}'
-            f'{" · seit " + esc(r.get("first_seen")) if r.get("first_seen") else ""}</div></div>')
-
-    shop_host_chips = "".join(f'<button class="fchip" data-dim="shop" data-v="{esc(h)}">{esc(h)}</button>'
-                              for h in shop_hosts)
-    _av_chips = ('<button class="fchip" data-dim="av" data-v="ja">verfügbar</button>'
-                 '<button class="fchip" data-dim="av" data-v="nein">ausverkauft</button>'
-                 '<button class="fchip" data-dim="av" data-v="unbekannt">unbekannt</button>')
-    _src_chips = ('<button class="fchip" data-dim="src" data-v="watch">Watchlist</button>'
-                  '<button class="fchip" data-dim="src" data-v="sweep">Katalogfund</button>')
-    shop_filters_html = f'''
-    <div class="filterrow"><span class="flabel">Shop:</span><button class="fchip active" data-dim="shop" data-v="">Alle</button>{shop_host_chips}</div>
-    <div class="filterrow"><span class="flabel">Lager:</span><button class="fchip active" data-dim="av" data-v="">Alle</button>{_av_chips}</div>
-    <div class="filterrow"><span class="flabel">Herkunft:</span><button class="fchip active" data-dim="src" data-v="">Alle</button>{_src_chips}</div>'''
-    n_up = sum(1 for r in shop_items
-               if isinstance(r.get("price"), (int, float)) and isinstance(_hist_price(r, 1), (int, float))
-               and r["price"] > _hist_price(r, 1) + 0.005)
-    n_down = sum(1 for r in shop_items
-                 if isinstance(r.get("price"), (int, float)) and isinstance(_hist_price(r, 1), (int, float))
-                 and r["price"] < _hist_price(r, 1) - 0.005)
-    n_out = sum(1 for r in shop_items if r.get("available") is False)
-    shop_stat = (f"{len(shop_items)} Produkte · {len(shop_hosts)} Shops · {n_up} teurer · "
-                 f"{n_down} günstiger · {n_out} ausverkauft") if shop_items else ""
-    shop_body = ("".join(shop_rows) if shop_rows else
-                 '<div class="empty">Noch keine Produkte beobachtet. Trage Produkt-Adressen im Secret '
-                 'SHOP_WATCHLIST ein (eine pro Zeile) – der Katalog-Abgleich der Shopify-Shops läuft '
-                 'zusätzlich automatisch.</div>')
+        # Nichts anzeigen: Die Zusammenfassungszeile darüber nennt die 0 bereits.
+        rel_conflict_html = ""
+    rel_overview_html = f'{rel_sum_html}{rel_conflict_html}'
 
     # --- Vorschlag 5: Branchen- & Lizenz-Radar ---------------------------
     dig_html = ""
     if industry_digest:
-        dig_html = '<div class="digest">' + "".join(
-            f'<div class="dline"><div class="dhead">{esc(d["head"])}</div>'
-            + (f'<div class="dwhy">{esc(d["why"])}</div>' if d.get("why") else "")
-            + '</div>' for d in industry_digest) + '</div>'
+        dparts = []
+        for d in industry_digest:
+            lks = [l for l in (d.get("links") or []) if l.get("url")]
+            if lks:
+                # Die Überschrift führt direkt zur wichtigsten Meldung dahinter.
+                first = lks[0]
+                head = (f'<a class="dhead dlink" href="{esc(first["url"])}" target="_blank"'
+                        f' rel="noopener" title="{esc(first["title"])}">{esc(d["head"])}'
+                        f'<span class="dgo">{esc(first["name"])} ↗</span></a>')
+            else:
+                head = f'<div class="dhead">{esc(d["head"])}</div>'
+            why = f'<div class="dwhy">{esc(d["why"])}</div>' if d.get("why") else ""
+            more = ""
+            if len(lks) > 1:
+                more = '<div class="dsrc">Auch dazu: ' + " ".join(
+                    f'<a href="{esc(l["url"])}" target="_blank" rel="noopener"'
+                    f' title="{esc(l["title"])}">{esc(l["name"] or "Quelle")}</a>'
+                    for l in lks[1:]) + '</div>'
+            dparts.append(f'<div class="dline">{head}{why}{more}</div>')
+        dig_html = '<div class="digest">' + "".join(dparts) + '</div>'
     elif digest_note:
         dig_html = f'<div class="empty">{esc(digest_note)}</div>'
 
@@ -2464,8 +2384,9 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
         ind_panels.append(f'<div class="ipanel">{head}{note}{body}</div>')
     ind_body = ("".join(ind_panels) if ind_panels else
                 '<div class="empty">Branchenquellen derzeit nicht erreichbar.</div>')
-    ind_stat = (f"{len(industry)} Quellen · "
-                f"{sum(len(s.get('items', [])) for s in industry)} relevante Meldungen") if industry else ""
+    # Die Quellenzahl steht schon am Anfang der Zeile – hier nur die Meldungen.
+    ind_stat = (f"{sum(len(s.get('items', [])) for s in industry)} relevante Meldungen"
+                ) if industry else ""
 
     # --- News
     news_panels = []
@@ -2706,30 +2627,30 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   .rel-name {{ flex: 1; min-width: 220px; }}
   .rel-name a {{ text-decoration: none; }}
   .rel-name a:hover {{ text-decoration: underline; }}
-  .rel-cat {{ font-size: 12px; color: var(--muted); white-space: nowrap; }}
   .cl {{ font-size: 12px; color: var(--good-text); text-decoration: none; border: 1px solid var(--privat);
         border-radius: 99px; padding: 1px 8px; white-space: nowrap; }}
   /* --- Markt: Wettbewerbs-Sicht auf die Releases --------------------- */
   .rel.own {{ border-left: 3px solid var(--arbeit); }}
-  .cfg {{ font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 4px; white-space: nowrap;
-         border: 1px solid var(--border); color: var(--text-secondary); background: var(--page); }}
-  .cfg-hobby {{ color: #fff; background: var(--studium); border-color: var(--studium); }}
-  .cfg-retail {{ color: var(--text-secondary); background: var(--hairline); }}
-  .cfg-sticker {{ color: var(--good-text); border-color: var(--privat); }}
-  .cfg-unklar {{ color: var(--muted); }}
+  /* Nur "Hobby" trägt Farbe, Retail/Sticker bleiben graue Kleinschrift. */
+  .cfg {{ font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 4px; white-space: nowrap; }}
+  .cfg-hobby {{ color: #fff; background: var(--studium); }}
+  .cfgq {{ font-size: 11px; color: var(--muted); white-space: nowrap; }}
   .lg {{ font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 99px; cursor: pointer;
         border: 1px dashed var(--border); color: var(--muted); white-space: nowrap; }}
   .lg.lg-watch {{ border-style: solid; border-color: var(--focus); color: var(--focus); }}
   .fchip.watch {{ border-color: var(--focus); }}
-  .wgrid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 18px; }}
-  .wcard {{ background: var(--surface-1); border: 1px solid var(--border); border-top: 3px solid var(--focus);
-           border-radius: 12px; padding: 12px 14px; }}
-  .wcard-h {{ font-size: 12px; color: var(--muted); font-weight: 600; }}
-  .wcard-big {{ font-size: 30px; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }}
-  .wcard-sub {{ font-size: 12px; color: var(--muted); margin-bottom: 8px; }}
-  .wcard-rows {{ display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--text-secondary); }}
-  .wcard-rows b {{ font-variant-numeric: tabular-nums; color: var(--text-primary); }}
-  .rivalbox {{ margin-bottom: 18px; }}
+  .relsum {{ font-size: 13px; color: var(--text-secondary); background: var(--surface-1);
+            border: 1px solid var(--border); border-left: 3px solid var(--focus); border-radius: 8px;
+            padding: 8px 12px; margin-bottom: 12px; font-variant-numeric: tabular-nums; }}
+  .relsum b {{ color: var(--text-primary); font-weight: 650; }}
+  details.morefilters {{ margin: 2px 0 6px; }}
+  details.morefilters > summary {{ font-size: 12.5px; color: var(--text-secondary); cursor: pointer;
+                                 padding: 4px 0; width: fit-content; }}
+  details.morefilters > summary:hover {{ color: var(--focus); }}
+  details.rivalbox {{ margin-bottom: 18px; }}
+  details.rivalbox > summary {{ font-size: 13px; font-weight: 650; cursor: pointer; padding: 6px 0;
+                              color: var(--text-secondary); width: fit-content; }}
+  details.rivalbox > summary:hover {{ color: var(--focus); }}
   ul.rivallist {{ list-style: none; }}
   ul.rivallist li {{ display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; font-size: 13px;
                  padding: 6px 0; border-bottom: 1px solid var(--hairline); }}
@@ -2741,41 +2662,6 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   .rv-lg {{ font-size: 11px; color: var(--focus); white-space: nowrap; }}
   .rv-cfg {{ font-size: 11px; color: var(--muted); white-space: nowrap; }}
 
-  /* --- Markt: Händler-Monitor ---------------------------------------- */
-  .sw {{ background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
-        padding: 10px 12px; margin-bottom: 6px; }}
-  .sw-main {{ display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; font-size: 14px; }}
-  .sw-shop {{ font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 99px; cursor: pointer;
-             border: 1px solid var(--arbeit); color: var(--arbeit); white-space: nowrap; }}
-  .sw-name {{ flex: 1; min-width: 200px; }}
-  .sw-name a {{ text-decoration: none; color: inherit; }}
-  .sw-name a:hover {{ text-decoration: underline; }}
-  .sw-num {{ display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin-top: 6px; }}
-  .sw-price {{ font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }}
-  .sw-d {{ display: flex; flex-direction: column; line-height: 1.2; }}
-  .sw-dl {{ font-size: 10px; color: var(--muted); font-style: normal; }}
-  .sw-mm {{ font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }}
-  .dl {{ font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }}
-  .dl em {{ font-style: normal; font-weight: 500; opacity: .8; }}
-  .dl-up {{ color: var(--bad-text); }}
-  .dl-down {{ color: var(--good-text); }}
-  .dl-flat {{ color: var(--muted); }}
-  .spark {{ display: block; }}
-  .spark-up {{ color: var(--bad-text); }}
-  .spark-down {{ color: var(--good-text); }}
-  .spark-flat {{ color: var(--muted); }}
-  .spark-none {{ color: var(--muted); font-size: 12px; width: 92px; text-align: center; }}
-  .av {{ font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 99px; white-space: nowrap; }}
-  .av-yes {{ color: var(--good-text); border: 1px solid var(--privat); }}
-  .av-no {{ color: var(--bad-text); border: 1px solid var(--bad); }}
-  .av-unk {{ color: var(--muted); border: 1px dashed var(--border); }}
-  .flip {{ font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 99px;
-          color: #fff; background: var(--privat); white-space: nowrap; }}
-  .flip-out {{ background: var(--bad); }}
-  .stale {{ font-size: 11px; color: var(--muted); border: 1px dashed var(--border);
-           border-radius: 99px; padding: 1px 8px; white-space: nowrap; }}
-  .sw-meta {{ font-size: 11px; color: var(--muted); margin-top: 6px; }}
-
   /* --- Markt: Branchen- & Lizenz-Radar ------------------------------- */
   .digest {{ background: var(--surface-1); border: 1px solid var(--border); border-top: 3px solid var(--focus);
             border-radius: 12px; padding: 14px 16px; margin-bottom: 18px; }}
@@ -2783,7 +2669,16 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   .dline:last-child {{ border-bottom: none; }}
   .dline:first-child {{ padding-top: 0; }}
   .dhead {{ font-size: 14px; font-weight: 650; line-height: 1.35; }}
+  a.dhead {{ display: block; color: inherit; text-decoration: none; }}
+  a.dhead:hover {{ color: var(--focus); }}
+  a.dhead:hover .dgo {{ opacity: 1; }}
+  .dgo {{ font-size: 11px; font-weight: 500; color: var(--text-secondary); margin-left: 7px;
+         white-space: nowrap; opacity: .72; }}
   .dwhy {{ font-size: 13px; color: var(--text-secondary); line-height: 1.4; margin-top: 2px; }}
+  .dsrc {{ font-size: 11.5px; color: var(--text-secondary); margin-top: 4px; }}
+  .dsrc a {{ color: var(--text-secondary); text-decoration: none; border-bottom: 1px dotted var(--border);
+            margin-right: 8px; }}
+  .dsrc a:hover {{ color: var(--focus); border-bottom-color: var(--focus); }}
   .ipanel {{ background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }}
   .ihead {{ display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 6px; }}
   .ihead a {{ font-size: 14px; font-weight: 650; text-decoration: none; color: inherit; }}
@@ -2958,22 +2853,15 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     <h2 class="vtitle">Markt · Trading Cards</h2>
     <nav class="subnav">
       <button class="active" data-subview="sub-rel">Releases</button>
-      <button data-subview="sub-shops">Händler</button>
       <button data-subview="sub-industry">Branche</button>
     </nav>
 
     <div id="sub-rel" class="subview active">
-      <div class="srcline">Quelle: <a href="{RELEASES_URL}" target="_blank" rel="noopener">collectosk.com</a> · Stand {stand} Uhr{" · " + rel_stat if rel_stat else ""}{" · " + esc(releases_note) if releases_note else ""}{" · Beobachtet: " + esc(", ".join(watch_leagues)) if watch_leagues else ""} · Tipp: Hersteller- oder Liga-Badge anklicken filtert direkt</div>
+      <div class="srcline">Quelle: <a href="{RELEASES_URL}" target="_blank" rel="noopener">collectosk.com</a> · Stand {stand} Uhr{" · " + rel_stat if rel_stat else ""}{" · " + esc(releases_note) if releases_note else ""}</div>
       {rel_overview_html}
       {rel_filters_html}
       {rel_body}
       {rel_past_html}
-    </div>
-
-    <div id="sub-shops" class="subview">
-      <div class="srcline">Preise und Lagerstatus direkt von den Shop-Seiten · höchstens alle {SHOP_INTERVAL_HOURS} h abgefragt · Stand {stand} Uhr{" · " + shop_stat if shop_stat else ""}{" · " + esc(shopwatch_note) if shopwatch_note else ""}</div>
-      {shop_filters_html}
-      {shop_body}
     </div>
 
     <div id="sub-industry" class="subview">
@@ -3137,6 +3025,10 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     }});
     document.querySelectorAll('#sub-rel .fchip').forEach(c =>
       c.classList.toggle('active', relF[c.dataset.dim] === c.dataset.v));
+    // Liegt ein aktiver Filter hinter "Weitere Filter", wird der Abschnitt
+    // aufgeklappt – sonst wäre nicht zu sehen, warum die Liste kürzer ist.
+    const more = document.querySelector('#sub-rel .morefilters');
+    if (more && (relF.config || relF.league || relF.maker || relF.cat)) more.open = true;
   }}
   document.querySelectorAll('#sub-rel .fchip').forEach(c => c.addEventListener('click', () => {{
     relF[c.dataset.dim] = c.dataset.v; applyRel();
@@ -3148,25 +3040,6 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   document.querySelectorAll('#sub-rel .lg').forEach(b => b.addEventListener('click', () => {{
     const v = b.textContent.trim();
     relF.league = (relF.league === v) ? '' : v; applyRel();
-  }}));
-  // Händler-Monitor: Shop + Lagerstatus + Herkunft kombinierbar
-  const swF = {{ shop: '', av: '', src: '' }};
-  function applyShop() {{
-    document.querySelectorAll('#sub-shops .sw').forEach(el => {{
-      const ok = (!swF.shop || el.dataset.shop === swF.shop)
-        && (!swF.av || el.dataset.av === swF.av)
-        && (!swF.src || el.dataset.src === swF.src);
-      el.style.display = ok ? '' : 'none';
-    }});
-    document.querySelectorAll('#sub-shops .fchip').forEach(c =>
-      c.classList.toggle('active', swF[c.dataset.dim] === c.dataset.v));
-  }}
-  document.querySelectorAll('#sub-shops .fchip').forEach(c => c.addEventListener('click', () => {{
-    swF[c.dataset.dim] = c.dataset.v; applyShop();
-  }}));
-  document.querySelectorAll('#sub-shops .sw-shop').forEach(b => b.addEventListener('click', () => {{
-    const v = b.textContent.trim();
-    swF.shop = (swF.shop === v) ? '' : v; applyShop();
   }}));
   // Podcast: Karussell (Pfeile, Punkte, Swipe)
   (() => {{
@@ -3323,7 +3196,7 @@ def main():
     today = now.date()
 
     shows_note = releases_note = trello_note = podcast_note = weather_note = day_focus_note = None
-    shopwatch_note = industry_note = digest_note = None
+    industry_note = digest_note = None
 
     # --- Markt: eigene Marken und beobachtete Ligen (per Secret anpassbar) ---
     def _lines_or_commas(raw, default):
@@ -3335,7 +3208,7 @@ def main():
 
     if os.environ.get("DASH_TEST") == "1":
         (tasks, done_today, events, cardshows, news, releases, trello, podcast,
-         weather, day_focus, news_digest, cal_meta, shopwatch, industry,
+         weather, day_focus, news_digest, cal_meta, industry,
          industry_digest) = testdata(today)
     else:
         token = (os.environ.get("TODOIST_TOKEN") or "").strip()
@@ -3394,33 +3267,8 @@ def main():
         news_digest = summarize_news_digest(news, anthropic_key, today)
         podcast, podcast_note = fetch_podcast(anthropic_key)
 
-        # --- Markt · Händler-Monitor -------------------------------------
-        # SHOP_WATCHLIST: eine Produkt-Adresse pro Zeile, optional mit
-        # "| Wunschname" dahinter. SHOP_PROBE: Adressen, die nur einmal zur
-        # Diagnose ins Actions-Log geschrieben werden (z.B. packsunited.de).
-        watchlist = []
-        for line in (os.environ.get("SHOP_WATCHLIST") or "").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if "|" in line:
-                u, lbl = line.split("|", 1)
-                u, lbl = u.strip(), lbl.strip() or None
-            else:
-                u, lbl = line, None
-            if u.startswith("http"):
-                watchlist.append((u, lbl))
-        probe_urls = [u.strip() for u in (os.environ.get("SHOP_PROBE") or "").splitlines()
-                      if u.strip().startswith("http")]
-        sweep_keywords = _lines_or_commas(os.environ.get("SHOP_SWEEP_KEYWORDS"),
-                                         SHOP_SWEEP_KEYWORDS_DEFAULT)
-        try:
-            shopwatch, shopwatch_note = fetch_shopwatch(watchlist, sweep_keywords, now,
-                                                        probe_urls=probe_urls)
-        except Exception as e:
-            print(f"Hinweis: Händler-Monitor komplett fehlgeschlagen ({e}).")
-            shopwatch = (load_cache("shopwatch") or {}).get("items") or {}
-            shopwatch_note = "Abruf fehlgeschlagen – Stand vom letzten erfolgreichen Lauf."
+        # Hinweis: Der Händler-Monitor ist stillgelegt (siehe Kommentar bei
+        # fetch_shopwatch) – hier wird bewusst nichts abgerufen.
 
         # --- Markt · Branchen- & Lizenz-Radar ----------------------------
         # INDUSTRY_FEEDS: optional eigene Quellen, eine pro Zeile als
@@ -3450,7 +3298,7 @@ def main():
                        shows_note, releases, releases_note, trello, trello_note,
                        podcast, podcast_note, weather, weather_note,
                        day_focus, day_focus_note, news_digest, cal_meta,
-                       shopwatch, shopwatch_note, industry, industry_note,
+                       industry, industry_note,
                        industry_digest, digest_note, watch_leagues)
     encrypted = encrypt_page(plain, password)
     with open("index.html", "w", encoding="utf-8") as f:
@@ -3459,7 +3307,6 @@ def main():
     print(f"OK: index.html geschrieben ({len(encrypted)} Zeichen), {len(tasks)} Aufgaben, "
           f"{len(events)} Termine, {len(cardshows)} Cardshows, {len(releases)} Releases, "
           f"{trello_n} Trello-Karten, {len(podcast)} Podcast-Folgen, {len(weather)} Wetter-Tage, "
-          f"{len(shopwatch)} beobachtete Produkte, "
           f"{sum(len(s['items']) for s in industry)} Branchenmeldungen, "
           f"Stand {now.strftime('%H:%M')} Uhr")
 

@@ -38,9 +38,6 @@ Secrets anlegen (Name exakt so schreiben) – die ersten drei sind Pflicht, der 
 | `TRELLO_KEY` | *(optional)* dein Trello-API-Key | [trello.com/app-key](https://trello.com/app-key) (eingeloggt öffnen) → oben den **Key** kopieren |
 | `TRELLO_TOKEN` | *(optional)* dein Trello-Token | Auf derselben Seite unten auf **„Token"** klicken → Zugriff erlauben → den angezeigten Token kopieren |
 | `ANTHROPIC_API_KEY` | *(optional)* dein Claude-API-Key | [console.anthropic.com](https://console.anthropic.com/) → **Get API Keys** → neuen Key erstellen (eigenes, separates Konto mit Guthaben – siehe unten) |
-| `SHOP_WATCHLIST` | *(optional)* Produkt-Adressen, **eine pro Zeile**, optional `\| Wunschname` dahinter | Produktseite im Shop öffnen, Adresse aus der Browserzeile kopieren – siehe „Reiter Markt → Händler" unten |
-| `SHOP_PROBE` | *(optional)* Produkt-Adressen zum Testen, eine pro Zeile | Nur zur Diagnose: prüft im Actions-Log, ob ein Shop maschinenlesbare Preise liefert |
-| `SHOP_SWEEP_KEYWORDS` | *(optional)* Suchwörter für den Katalog-Abgleich, eine pro Zeile oder per Komma | Vorgabe: `bundesliga`, `panini`, `topps` |
 | `INDUSTRY_FEEDS` | *(optional)* eigene Branchenquellen, je Zeile `Name \| Feed-Adresse` | Ersetzt die eingebaute Quellenliste komplett – siehe „Reiter Markt → Branche" unten |
 | `INDUSTRY_KEYWORDS` | *(optional)* Filterwörter für die Branchenquellen, eine pro Zeile oder per Komma | Ersetzt die eingebaute Wortliste (Lizenz, Hobby, Bundesliga, Panini, Topps …) |
 | `OWN_BRANDS` | *(optional)* eigene Marken, eine pro Zeile oder per Komma | Vorgabe: `Panini`. Bestimmt, was als „eigen" statt „Wettbewerb" gilt |
@@ -161,47 +158,33 @@ Listen, die auch tatsächlich Karten enthalten, damit es übersichtlich bleibt.
   lässt sich einzeln ein-/ausblenden, die Auswahl gilt gemeinsam für Woche,
   Monat und Terminliste und bleibt beim Wechseln zwischen den Unterreitern
   erhalten. So bleibt die Übersicht auch mit vielen Kalendern übersichtlich.
-- **Reiter „Markt":** Ersetzt den früheren Reiter „Releases" und fasst drei
-  Unterreiter zusammen: **Releases**, **Händler** und **Branche**. Die Auswahl
+- **Reiter „Markt":** Ersetzt den früheren Reiter „Releases" und fasst zwei
+  Unterreiter zusammen: **Releases** und **Branche**. Die Auswahl
   des Unterreiters ist unabhängig von der im Reiter „Kalender".
-- **Markt → Releases (Wettbewerbs-Sicht):** Dieselbe Release-Liste wie vorher,
-  jetzt zusätzlich eingeordnet. Jeder Release bekommt automatisch aus seinem
-  Titel eine **Konfiguration** (Hobby / Retail / Sticker, oder `?` wenn nicht
-  erkennbar) und eine **Liga/Lizenz** (Bundesliga, Champions League, FIFA/WM,
-  Premier League …). Eigene Releases (alles aus `OWN_BRANDS`) haben einen
-  blauen Rand links, alles andere gilt als Wettbewerb. Oben stehen drei
-  Kennzahlen-Karten für die nächsten 30/60/90 Tage (Anzahl insgesamt, eigen vs.
-  Wettbewerb, eigener Anteil in Prozent, Hobby-Anteil, Treffer in beobachteten
-  Ligen) und darunter die Liste **„Wettbewerbs-Releases in beobachteten Ligen"**
-  – also genau die Termine, die für die eigene Planung kollidieren könnten.
-  Filterbar nach Sicht, Konfiguration, Liga/Lizenz, Hersteller, Kategorie und
-  Monat; ein Klick auf ein Hersteller- oder Liga-Badge filtert direkt.
+- **Markt → Releases (aufgeräumt, mit Wettbewerbs-Einordnung):** Im Vordergrund
+  steht wieder die schlichte Release-Liste. Darüber steht **eine** kurze
+  Textzeile mit den nächsten 90 Tagen (Anzahl insgesamt, davon eigen bzw.
+  Wettbewerb, Treffer in beobachteten Ligen) statt der früheren drei
+  Kennzahlen-Karten. Die Liste **„Wettbewerb in beobachteten Ligen"** steckt
+  jetzt in einem zugeklappten Abschnitt – ein Klick öffnet sie. Sichtbar sind
+  nur die zwei wichtigsten Filterzeilen (**Sicht** und **Monat**); Konfiguration,
+  Liga/Lizenz, Hersteller und Kategorie liegen hinter „Weitere Filter".
+  Jede Zeile bleibt eingeordnet, aber ruhiger: eigene Releases haben einen
+  blauen Rand links, **Hobby** trägt eine dezente Pille, Retail/Sticker stehen
+  als graue Kleinschrift daneben, bei nicht erkennbarer Konfiguration steht
+  nichts mehr (früher `?`), und die doppelte Kategorie-Angabe ist entfallen.
+  Die Liga/Lizenz bleibt anklickbar und filtert direkt.
   **Keine KI, keine Kosten** – reine Auswertung der ohnehin geladenen Daten.
-- **Markt → Händler (Preis- und Verfügbarkeits-Monitor):** Liest Preis und
-  Lagerstatus direkt von den Produktseiten deutscher Trading-Card-Shops
-  (aktuell deichcards.de, crispycards.de, trading-card-corner.de, collect-it.de,
-  cardport.de, card-corner.de, inside-the-box.de) – höchstens alle 2 Stunden je
-  Shop, mit Pause zwischen den Abrufen, damit die Shops nicht belastet werden.
-  Je Produkt siehst du den aktuellen Preis, die Veränderung zu gestern und zur
-  Vorwoche, eine kleine Verlaufskurve, Minimum/Maximum, den Lagerstatus
-  (verfügbar / ausverkauft / **unbekannt**, wenn der Shop es nicht verrät) und
-  einen Marker, wenn ein Produkt gerade **wieder da** oder **neu ausverkauft**
-  ist. Der Verlauf wird 180 Tage lang in `cache/shopwatch.json` mitgeschrieben.
-  Zwei Wege, wie Produkte in die Liste kommen: **(1) Watchlist** – Adressen im
-  Secret `SHOP_WATCHLIST`, eine pro Zeile, optional mit `| Wunschname`
-  dahinter; diese bleiben dauerhaft in der Liste, auch wenn ein Shop sie mal
-  nicht ausliefert (dann steht „nicht gefunden" daran). **(2) Katalog-Abgleich**
-  – bei den Shopify-Shops wird der Katalog nach den Wörtern aus
-  `SHOP_SWEEP_KEYWORDS` durchsucht und passende Treffer automatisch ergänzt;
-  verschwindet so ein Treffer länger als 30 Tage, fällt er wieder heraus.
-  **Keine KI, keine Kosten.**
-- **Markt → Branche (Branchen- und Lizenz-Radar):** Sammelt Meldungen aus
-  Branchenquellen (Cardlines, Cardboard Connection, Sports Collectors Daily,
-  CrispyCards-Blog, Kartenfan, Google-News-Suche DE) und filtert sie auf die
+- **Markt → Branche (Branchen- und Lizenz-Radar):** Sammelt Meldungen aus vier
+  Branchenquellen (Cardlines, Cardboard Connection, Google-News-Suche
+  international und Google-News-Suche DE) und filtert sie auf die
   für dich relevanten Stichwörter (Lizenz, Rechte, Hobby, Bundesliga, Panini,
   Topps, Fanatics, Grading …). Oben fasst Claude einmal **pro Kalendertag**
   die wichtigsten 5 Punkte zusammen – jeweils mit einer Zeile dazu, was das
-  konkret für Panini bedeutet. Darunter je Quelle eine Kachel mit der
+  konkret für Panini bedeutet. **Jede Zeile der Kurzfassung ist verlinkt:**
+  die Überschrift führt direkt zur Meldung, auf die sie sich stützt, und
+  stützt sie sich auf mehrere, stehen die weiteren als kleine Verweise
+  darunter. Darunter je Quelle eine Kachel mit der
   ungefilterten Rohliste („2 von 12" = 2 relevante von 12 geladenen
   Meldungen), die sich bei jedem Lauf aktualisiert. Ist eine Quelle mal nicht
   erreichbar, steht das an der jeweiligen Kachel und die übrigen laufen
