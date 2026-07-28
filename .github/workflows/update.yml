@@ -8,6 +8,7 @@ on:
     branches: [main]
     paths:
       - build_dashboard.py
+      - italian_course.py
       - .github/workflows/update.yml
 
 permissions:

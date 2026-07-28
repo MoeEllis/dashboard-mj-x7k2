@@ -1895,6 +1895,826 @@ def fmt_show_date(s):
     return base
 
 
+# ------------------------------------------------------ Italienisch-Kurs ---
+# Der Lernstoff liegt in italian_course.py (reine Datendatei). Fehlt sie oder
+# ist sie fehlerhaft, bleibt der Reiter leer – der Dashboard-Bau läuft weiter.
+try:
+    from italian_course import kurs_daten as _it_kurs_daten
+    ITALIAN_COURSE = _it_kurs_daten()
+except Exception as _it_err:            # pragma: no cover - Schutzschicht
+    print(f"Hinweis: Italienisch-Kurs nicht geladen ({_it_err}).")
+    ITALIAN_COURSE = {"bloecke": [], "lektionen": [], "aussprache": []}
+
+# CSS und JS des Reiters stehen absichtlich als eigene Klartext-Bausteine hier
+# und nicht in der großen f-String-Vorlage von build_html: dort müsste jede
+# Klammer verdoppelt werden, was bei diesem Umfang unweigerlich zu Fehlern
+# führt. Sie werden unten als {IT_CSS} bzw. {IT_JS} eingesetzt.
+IT_CSS = '''
+  /* ---------------- Italienisch: Lernbereich ---------------- */
+  .itnudge { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
+             border-left: 3px solid var(--italiano); padding: 14px 16px; margin-bottom: 20px;
+             display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .itnudge .n-flame { font-size: 26px; line-height: 1; }
+  .itnudge .n-main { flex: 1 1 260px; min-width: 0; }
+  .itnudge .n-head { font-size: 14px; font-weight: 650; }
+  .itnudge .n-sub { font-size: 12.5px; color: var(--text-secondary); margin-top: 3px; }
+  .itnudge .n-satz { font-size: 12.5px; color: var(--text-secondary); margin-top: 6px; font-style: italic; }
+  .itnudge.done { border-left-color: var(--good); }
+  .itbtn { padding: 8px 16px; font-size: 13px; font-weight: 650; border-radius: 99px; border: 1px solid var(--italiano);
+           background: var(--italiano); color: #fff; cursor: pointer; white-space: nowrap; }
+  .itbtn:hover { filter: brightness(1.08); }
+  .itbtn.ghost { background: var(--surface-1); color: var(--text-secondary); border-color: var(--border); }
+  .itbtn.ghost:hover { color: var(--italiano); border-color: var(--italiano); filter: none; }
+  .itbtn:disabled { opacity: .45; cursor: default; filter: none; }
+  .itbtn.small { padding: 5px 12px; font-size: 12px; }
+
+  .ittop { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .itstat { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 13px 15px; }
+  .itstat .l { font-size: 11.5px; color: var(--muted); margin-bottom: 5px; }
+  .itstat .v { font-size: 24px; font-weight: 650; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .itstat .s { font-size: 11.5px; color: var(--text-secondary); margin-top: 3px; }
+
+  .itcards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .itcard { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px;
+            border-top: 3px solid var(--italiano); display: flex; flex-direction: column; gap: 8px; }
+  .itcard.ok { border-top-color: var(--good); }
+  .itcard .c-kicker { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .itcard .c-title { font-size: 15px; font-weight: 650; }
+  .itcard .c-text { font-size: 13px; color: var(--text-secondary); }
+  .itcard .c-act { margin-top: 4px; display: flex; gap: 8px; flex-wrap: wrap; }
+
+  .itbar { height: 7px; border-radius: 99px; background: var(--hairline); overflow: hidden; margin-top: 8px; }
+  .itbar > i { display: block; height: 100%; background: var(--italiano); border-radius: 99px; transition: width .3s; }
+  .itbar.good > i { background: var(--good); }
+
+  .itbadges { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+  .itbadge { font-size: 12px; font-weight: 600; padding: 5px 11px; border-radius: 99px; border: 1px dashed var(--border);
+             color: var(--muted); background: var(--surface-1); }
+  .itbadge.got { border-style: solid; border-color: var(--italiano); color: #fff; background: var(--italiano); }
+
+  .itsatz { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .itsatz .l { font-size: 11.5px; color: var(--muted); margin-bottom: 6px; }
+  .itsatz .it { font-size: 17px; font-weight: 600; }
+  .itsatz .de { font-size: 13px; color: var(--text-secondary); margin-top: 4px; }
+
+  details.itblock { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 10px; }
+  details.itblock > summary { padding: 13px 16px; cursor: pointer; font-size: 14px; font-weight: 650; list-style: none; }
+  details.itblock > summary::-webkit-details-marker { display: none; }
+  details.itblock > summary:hover { color: var(--italiano); }
+  details.itblock .b-claim { font-size: 12.5px; font-weight: 400; color: var(--text-secondary); margin-top: 3px; }
+  details.itblock .b-ziel { font-size: 12.5px; color: var(--text-secondary); padding: 0 16px 10px; }
+  .itlist { border-top: 1px solid var(--hairline); }
+  .itrow { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--hairline);
+           cursor: pointer; }
+  .itrow:last-child { border-bottom: none; }
+  .itrow:hover { background: rgba(0,0,0,0.03); }
+  @media (prefers-color-scheme: dark) { .itrow:hover { background: rgba(255,255,255,0.04); } }
+  .itrow .r-nr { font-size: 12px; color: var(--muted); width: 26px; flex: none; font-variant-numeric: tabular-nums; }
+  .itrow .r-mark { width: 18px; flex: none; text-align: center; font-size: 13px; }
+  .itrow .r-body { flex: 1 1 auto; min-width: 0; }
+  .itrow .r-title { display: block; font-size: 13.5px; font-weight: 600; }
+  .itrow .r-ziel { display: block; font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+  .itrow.done .r-title { color: var(--done-ink); font-weight: 500; }
+  .itrow.next { background: rgba(31,158,90,0.09); }
+  .itrow .r-tag { font-size: 10.5px; font-weight: 650; padding: 2px 7px; border-radius: 4px; background: var(--italiano);
+                  color: #fff; flex: none; white-space: nowrap; }
+  .itrow .r-tag.ms { background: var(--warn); }
+
+  .itsearch { width: 100%; max-width: 320px; padding: 8px 12px; font-size: 13px; border-radius: 8px;
+              border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); margin-bottom: 12px; }
+  .itvoc { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .itvline { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--hairline); }
+  .itvline:last-child { border-bottom: none; }
+  .itvline .v-it { font-size: 13.5px; font-weight: 600; flex: 1 1 45%; min-width: 0; }
+  .itvline .v-de { font-size: 13px; color: var(--text-secondary); flex: 1 1 45%; min-width: 0; }
+  .itvline .v-box { font-size: 10.5px; color: var(--muted); flex: none; font-variant-numeric: tabular-nums; }
+  .say { border: none; background: none; cursor: pointer; font-size: 14px; padding: 2px 4px; color: var(--text-secondary);
+         flex: none; border-radius: 6px; line-height: 1; }
+  .say:hover { color: var(--italiano); background: var(--hairline); }
+
+  .itpron { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 6px 14px; margin-top: 8px; }
+  .itpron div { font-size: 12.5px; color: var(--text-secondary); }
+  .itpron b { color: var(--text-primary); font-weight: 650; }
+
+  /* Lektionsablauf: liegt als Ebene über der Seite, damit der Fokus wirklich
+     auf der Lektion liegt und nichts anderes ablenkt. */
+  .itover { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 90; display: none;
+            padding: 20px; overflow-y: auto; }
+  .itover.on { display: block; }
+  .itsheet { max-width: 660px; margin: 0 auto; background: var(--page); border: 1px solid var(--border);
+             border-radius: 14px; padding: 20px; }
+  .itsheet .s-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 4px; }
+  .itsheet .s-kicker { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .itsheet .s-title { font-size: 18px; font-weight: 650; margin-top: 2px; }
+  .itsheet .s-close { margin-left: auto; border: none; background: none; font-size: 20px; cursor: pointer;
+                      color: var(--muted); line-height: 1; padding: 2px 6px; }
+  .itsheet .s-close:hover { color: var(--bad-text); }
+  .itsteps { display: flex; gap: 5px; margin: 12px 0 16px; }
+  .itsteps i { flex: 1 1 0; height: 4px; border-radius: 99px; background: var(--hairline); }
+  .itsteps i.on { background: var(--italiano); }
+  .itsheet .s-goal { font-size: 13px; color: var(--text-secondary); margin-bottom: 12px; }
+  .itsheet .s-body { min-height: 180px; }
+  .itsheet .s-foot { display: flex; gap: 8px; align-items: center; margin-top: 18px; flex-wrap: wrap; }
+  .itsheet .s-foot .sp { margin-left: auto; font-size: 12px; color: var(--muted); }
+  .itsheet h3 { font-size: 14px; font-weight: 650; margin-bottom: 10px; }
+
+  .itpair { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--hairline); }
+  .itpair:last-child { border-bottom: none; }
+  .itpair .p-it { font-size: 14.5px; font-weight: 600; flex: 1 1 45%; }
+  .itpair .p-de { font-size: 13px; color: var(--text-secondary); flex: 1 1 45%; }
+  .itgram { background: var(--surface-1); border: 1px solid var(--border); border-left: 3px solid var(--italiano);
+            border-radius: 10px; padding: 14px 16px; }
+  .itgram .g-t { font-size: 14px; font-weight: 650; margin-bottom: 6px; }
+  .itgram .g-x { font-size: 13.5px; color: var(--text-secondary); line-height: 1.55; }
+
+  .itq { }
+  .itq .q-n { font-size: 11.5px; color: var(--muted); margin-bottom: 6px; }
+  .itq .q-word { font-size: 20px; font-weight: 650; margin-bottom: 14px; }
+  .itopt { display: grid; gap: 8px; }
+  .itopt button { text-align: left; padding: 11px 14px; font-size: 13.5px; border-radius: 10px;
+                  border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary); cursor: pointer; }
+  .itopt button:hover { border-color: var(--italiano); }
+  .itopt button.right { border-color: var(--good); background: rgba(12,163,12,0.12); font-weight: 650; }
+  .itopt button.wrong { border-color: var(--bad); background: rgba(208,59,59,0.12); }
+  .itopt button:disabled { cursor: default; }
+  .itfeed { font-size: 13px; margin-top: 12px; min-height: 20px; color: var(--text-secondary); }
+  .itfeed.ok { color: var(--good-text); font-weight: 600; }
+  .itfeed.no { color: var(--bad-text); font-weight: 600; }
+
+  .ittask { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .ittask .t-l { font-size: 11.5px; color: var(--muted); margin-bottom: 6px; }
+  .ittask .t-x { font-size: 14.5px; line-height: 1.5; }
+  .itdone { text-align: center; padding: 18px 0; }
+  .itdone .d-ic { font-size: 38px; }
+  .itdone .d-t { font-size: 17px; font-weight: 650; margin-top: 8px; }
+  .itdone .d-s { font-size: 13px; color: var(--text-secondary); margin-top: 6px; }
+
+  /* Karteikasten */
+  .ittrain { text-align: center; }
+  .ittrain .tr-front { font-size: 26px; font-weight: 650; margin: 14px 0 6px; }
+  .ittrain .tr-dir { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .ittrain .tr-back { font-size: 17px; color: var(--text-secondary); min-height: 26px; margin-bottom: 6px; }
+  .ittrain .tr-src { font-size: 11.5px; color: var(--muted); }
+  .ittrain .tr-act { display: flex; gap: 8px; justify-content: center; margin-top: 18px; flex-wrap: wrap; }
+  .itboxes { display: flex; gap: 6px; justify-content: center; margin-top: 14px; flex-wrap: wrap; }
+  .itboxes span { font-size: 11px; color: var(--text-secondary); background: var(--surface-1); border: 1px solid var(--border);
+                  border-radius: 99px; padding: 3px 9px; font-variant-numeric: tabular-nums; }
+  .itempty { font-size: 13px; color: var(--muted); padding: 18px 0; text-align: center; }
+'''
+
+# Der Lernbereich läuft vollständig im Browser: kein Netz, kein API-Schlüssel,
+# keine Kosten. Der Fortschritt liegt in localStorage – er übersteht die
+# 30-Minuten-Neubauten, ist aber an Gerät und Browser gebunden.
+IT_JS = '''
+  // ------------------------------------------------------- Italienisch ---
+  (function () {
+    const C = window.ITCORSO;
+    if (!C || !Array.isArray(C.lektionen) || !C.lektionen.length) return;
+    const LK = C.lektionen, BL = C.bloecke || [], PRON = C.aussprache || [];
+    const KEY = 'it_progress_v1';
+    // Leitner-Kasten: Fach 0 kommt morgen wieder, Fach 5 erst in fünf Wochen.
+    const FACH_TAGE = [1, 2, 4, 8, 16, 35];
+    const ZIEL_KARTEN = 12;   // Tagesziel, wenn gerade nichts fällig ist
+
+    function heute() {
+      const d = new Date();
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') +
+             '-' + String(d.getDate()).padStart(2, '0');
+    }
+    function plusTage(n) {
+      const d = new Date();
+      d.setDate(d.getDate() + n);
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') +
+             '-' + String(d.getDate()).padStart(2, '0');
+    }
+    function tageDiff(a, b) {
+      return Math.round((new Date(b + 'T00:00:00') - new Date(a + 'T00:00:00')) / 86400000);
+    }
+
+    const leer = { done: [], karten: {}, serie: { n: 0, best: 0, letzter: '' },
+                   tag: { d: '', lekt: 0, karten: 0 }, richtung: 'it' };
+    let P = leer;
+    try {
+      const raw = localStorage.getItem(KEY);
+      if (raw) P = Object.assign({}, leer, JSON.parse(raw));
+      P.serie = Object.assign({ n: 0, best: 0, letzter: '' }, P.serie || {});
+      P.tag = Object.assign({ d: '', lekt: 0, karten: 0 }, P.tag || {});
+      if (!Array.isArray(P.done)) P.done = [];
+      if (!P.karten || typeof P.karten !== 'object') P.karten = {};
+    } catch (e) { P = JSON.parse(JSON.stringify(leer)); }
+    if (P.tag.d !== heute()) P.tag = { d: heute(), lekt: 0, karten: 0 };
+
+    function sichern() {
+      try { localStorage.setItem(KEY, JSON.stringify(P)); } catch (e) {}
+    }
+
+    // --- Aussprache über die Sprachausgabe des Browsers -------------------
+    let stimmen = [];
+    function ladeStimmen() {
+      try { stimmen = window.speechSynthesis.getVoices() || []; } catch (e) { stimmen = []; }
+    }
+    if (window.speechSynthesis) {
+      ladeStimmen();
+      window.speechSynthesis.addEventListener('voiceschanged', ladeStimmen);
+    }
+    function sprich(text) {
+      if (!window.speechSynthesis || !text) return;
+      try {
+        const u = new SpeechSynthesisUtterance(String(text).replace(/\\s*\\/\\s*/g, ', '));
+        u.lang = 'it-IT';
+        u.rate = 0.9;
+        const v = stimmen.find(s => /^it/i.test(s.lang));
+        if (v) u.voice = v;
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(u);
+      } catch (e) {}
+    }
+    const hatTon = !!window.speechSynthesis;
+    function tonKnopf(text) {
+      if (!hatTon) return '';
+      return '<button class="say" data-say="' + esc(text) + '" title="Aussprache anhören">🔊</button>';
+    }
+
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // --- Kartenverwaltung -------------------------------------------------
+    function kartenAnlegen(l) {
+      (l.woerter || []).forEach((w, i) => {
+        const id = 'W' + l.nr + '-' + i;
+        if (!P.karten[id]) P.karten[id] = { f: 0, d: plusTage(1) };
+      });
+      (l.saetze || []).forEach((s, i) => {
+        const id = 'S' + l.nr + '-' + i;
+        if (!P.karten[id]) P.karten[id] = { f: 0, d: plusTage(2) };
+      });
+    }
+    function kartePaar(id) {
+      const m = /^([WS])(\\d+)-(\\d+)$/.exec(id);
+      if (!m) return null;
+      const l = LK.find(x => x.nr === Number(m[2]));
+      if (!l) return null;
+      const arr = m[1] === 'W' ? l.woerter : l.saetze;
+      const p = arr && arr[Number(m[3])];
+      if (!p) return null;
+      return { it: p[0], de: p[1], lekt: l, art: m[1] === 'W' ? 'Wort' : 'Satz' };
+    }
+    function faellige() {
+      const h = heute();
+      return Object.keys(P.karten).filter(id => {
+        const k = P.karten[id];
+        return k && k.d <= h && kartePaar(id);
+      });
+    }
+    function fachZaehlung() {
+      const z = [0, 0, 0, 0, 0, 0];
+      Object.keys(P.karten).forEach(id => {
+        const k = P.karten[id];
+        if (k && kartePaar(id)) z[Math.min(5, Math.max(0, k.f | 0))]++;
+      });
+      return z;
+    }
+
+    // --- Fortschritt und Serie -------------------------------------------
+    function erledigt(nr) { return P.done.indexOf(nr) !== -1; }
+    function naechste() {
+      for (let i = 0; i < LK.length; i++) if (!erledigt(LK[i].nr)) return LK[i];
+      return LK[LK.length - 1];
+    }
+    function zielErreicht() {
+      if (P.tag.lekt > 0) return true;
+      if (P.tag.karten >= ZIEL_KARTEN) return true;
+      return P.tag.karten > 0 && faellige().length === 0;
+    }
+    function serieBuchen() {
+      if (!zielErreicht()) return;
+      const h = heute();
+      if (P.serie.letzter === h) return;
+      P.serie.n = (P.serie.letzter && tageDiff(P.serie.letzter, h) === 1) ? P.serie.n + 1 : 1;
+      P.serie.letzter = h;
+      if (P.serie.n > (P.serie.best || 0)) P.serie.best = P.serie.n;
+    }
+    function serieAktuell() {
+      // Ein ausgelassener Tag setzt zurück – aber erst ab dem Folgetag, damit
+      // heute noch alles rettbar ist.
+      if (!P.serie.letzter) return 0;
+      const d = tageDiff(P.serie.letzter, heute());
+      return d <= 1 ? (P.serie.n || 0) : 0;
+    }
+    function blockInfo(nr) {
+      const l = LK.filter(x => x.block === nr);
+      const f = l.filter(x => erledigt(x.nr)).length;
+      return { gesamt: l.length, fertig: f, lektionen: l };
+    }
+
+    // --- Reiter wechseln ---------------------------------------------------
+    function zeigeIT(sub) {
+      const b = document.querySelector('.viewnav button[data-view="view-italiano"]');
+      if (b) b.click();
+      if (sub) {
+        const s = document.querySelector('#view-italiano .subnav button[data-subview="' + sub + '"]');
+        if (s) s.click();
+      }
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    // --- Satz des Tages ---------------------------------------------------
+    function satzDesTages() {
+      const bis = naechste().nr;
+      const pool = [];
+      LK.forEach(l => {
+        if (l.nr <= bis) (l.saetze || []).forEach(s => pool.push({ it: s[0], de: s[1], nr: l.nr }));
+      });
+      if (!pool.length) return null;
+      const t = Math.floor(new Date(heute() + 'T00:00:00').getTime() / 86400000);
+      return pool[t % pool.length];
+    }
+
+    // ====================== Ansicht: Heute ================================
+    function zeichneHeute() {
+      const el = document.getElementById('sub-it-heute');
+      if (!el) return;
+      const fert = P.done.length, ges = LK.length;
+      const nx = naechste(), f = faellige().length, s = serieAktuell();
+      const ziel = zielErreicht();
+      const bl = BL.find(b => b.nr === nx.block) || {};
+      const bi = blockInfo(nx.block);
+      const sdt = satzDesTages();
+      const meilen = [12, 24, 36, 48];
+
+      let h = '<div class="srcline">Ein Durchgang: 15–20 Minuten · Fortschritt liegt nur in diesem Browser ' +
+              '(nicht geräteübergreifend) · Aussprache über die Stimme deines Geräts</div>';
+      h += '<div class="ittop">';
+      h += '<div class="itstat"><div class="l">Serie</div><div class="v">' + s +
+           (s === 1 ? ' Tag' : ' Tage') + '</div><div class="s">Bester Lauf: ' +
+           (P.serie.best || 0) + '</div></div>';
+      h += '<div class="itstat"><div class="l">Lektionen</div><div class="v">' + fert + '/' + ges +
+           '</div><div class="itbar' + (fert === ges ? ' good' : '') + '"><i style="width:' +
+           Math.round(fert / ges * 100) + '%"></i></div></div>';
+      h += '<div class="itstat"><div class="l">Karten fällig</div><div class="v">' + f +
+           '</div><div class="s">' + (f ? 'Wiederholung wartet' : 'alles aufgeholt') + '</div></div>';
+      h += '<div class="itstat"><div class="l">Tagesziel</div><div class="v">' + (ziel ? '✓' : 'offen') +
+           '</div><div class="s">' + (ziel ? 'heute geschafft' : 'eine Lektion oder alle fälligen Karten') +
+           '</div></div>';
+      h += '</div>';
+
+      h += '<div class="itcards">';
+      h += '<div class="itcard' + (P.tag.lekt ? ' ok' : '') + '">' +
+           '<div class="c-kicker">Lektion ' + nx.nr + ' · Block ' + nx.block + ' · ' + esc(bl.titel || '') + '</div>' +
+           '<div class="c-title">' + esc(nx.titel) + '</div>' +
+           '<div class="c-text">' + esc(nx.ziel) + '</div>' +
+           '<div class="itbar"><i style="width:' + Math.round(bi.fertig / bi.gesamt * 100) + '%"></i></div>' +
+           '<div class="c-text">Block ' + nx.block + ': ' + bi.fertig + ' von ' + bi.gesamt + ' Lektionen</div>' +
+           '<div class="c-act"><button class="itbtn" data-it-start="' + nx.nr + '">' +
+           (P.tag.lekt ? 'Nächste Lektion' : 'Lektion starten') + '</button>' +
+           '<button class="itbtn ghost" data-it-go="sub-it-kurs">Alle Lektionen</button></div></div>';
+
+      h += '<div class="itcard' + (f === 0 ? ' ok' : '') + '">' +
+           '<div class="c-kicker">Karteikasten</div>' +
+           '<div class="c-title">' + (f ? f + (f === 1 ? ' Karte' : ' Karten') + ' zur Wiederholung'
+                                        : 'Nichts fällig') + '</div>' +
+           '<div class="c-text">' + (f ? 'Wiederholen ist der Teil, der das Gelernte hält. Fünf Minuten genügen.'
+                                      : 'Du bist auf Stand. Neue Karten kommen mit der nächsten Lektion.') + '</div>' +
+           '<div class="c-text">Heute schon geübt: ' + P.tag.karten +
+           (P.tag.karten === 1 ? ' Karte' : ' Karten') + '</div>' +
+           '<div class="c-act"><button class="itbtn' + (f ? '' : ' ghost') + '" data-it-train="faellig"' +
+           (f ? '' : ' disabled') + '>Karten üben</button>' +
+           '<button class="itbtn ghost" data-it-train="alle">Freies Üben</button></div></div>';
+      h += '</div>';
+
+      if (sdt) {
+        h += '<div class="itsatz"><div class="l">Satz des Tages</div>' +
+             '<div class="it">' + esc(sdt.it) + ' ' + tonKnopf(sdt.it) + '</div>' +
+             '<div class="de">' + esc(sdt.de) + '</div></div>';
+      }
+
+      h += '<div class="itcard" style="border-top-color:var(--warn)">' +
+           '<div class="c-kicker">Meilensteine</div><div class="itbadges">' +
+           meilen.map(m => {
+             const b = BL.find(x => x.nr === Math.ceil(m / 12)) || {};
+             return '<span class="itbadge' + (erledigt(m) ? ' got' : '') + '">' +
+                    (erledigt(m) ? '★ ' : '') + esc(b.claim || ('Block ' + Math.ceil(m / 12))) + '</span>';
+           }).join('') + '</div>' +
+           '<div class="c-text">Jeder Meilenstein ist eine Lektion, in der du nur noch anwendest, was du kannst.</div></div>';
+
+      if (PRON.length) {
+        h += '<details class="itblock"><summary>Aussprache · die zehn Regeln, die alles abdecken</summary>' +
+             '<div class="b-ziel"><div class="itpron">' +
+             PRON.map(p => '<div><b>' + esc(p[0]) + '</b> – ' + esc(p[1]) + '</div>').join('') +
+             '</div></div></details>';
+      }
+      el.innerHTML = h;
+    }
+
+    // ====================== Ansicht: Kurs =================================
+    function zeichneKurs() {
+      const el = document.getElementById('sub-it-kurs');
+      if (!el) return;
+      const nx = naechste();
+      let h = '<div class="srcline">48 Lektionen · je 15–20 Minuten · eine pro Tag reicht. ' +
+              'Du kannst jede Lektion jederzeit öffnen und wiederholen.</div>';
+      BL.forEach(b => {
+        const bi = blockInfo(b.nr);
+        const offen = bi.fertig < bi.gesamt;
+        h += '<details class="itblock"' + (b.nr === nx.block ? ' open' : '') + '>' +
+             '<summary>Block ' + b.nr + ' · ' + esc(b.titel) + ' · ' + bi.fertig + '/' + bi.gesamt +
+             '<div class="b-claim">„' + esc(b.claim) + '“</div></summary>' +
+             '<div class="b-ziel">' + esc(b.ziel) + '<div class="itbar' + (offen ? '' : ' good') +
+             '"><i style="width:' + Math.round(bi.fertig / bi.gesamt * 100) + '%"></i></div></div>' +
+             '<div class="itlist">';
+        bi.lektionen.forEach(l => {
+          const d = erledigt(l.nr), ms = l.nr % 12 === 0;
+          h += '<div class="itrow' + (d ? ' done' : '') + (l.nr === nx.nr ? ' next' : '') +
+               '" data-it-start="' + l.nr + '">' +
+               '<span class="r-nr">' + l.nr + '</span>' +
+               '<span class="r-mark">' + (d ? '✓' : '·') + '</span>' +
+               '<span class="r-body"><span class="r-title">' + esc(l.titel) + '</span>' +
+               '<span class="r-ziel">' + esc(l.ziel) + '</span></span>' +
+               (ms ? '<span class="r-tag ms">Meilenstein</span>'
+                   : (l.nr === nx.nr ? '<span class="r-tag">dran</span>' : '')) +
+               '</div>';
+        });
+        h += '</div></details>';
+      });
+      el.innerHTML = h;
+    }
+
+    // ====================== Ansicht: Vokabeln =============================
+    let vocFilter = '';
+    function zeichneWoerter() {
+      const el = document.getElementById('sub-it-woerter');
+      if (!el) return;
+      const ids = Object.keys(P.karten).filter(id => kartePaar(id));
+      const z = fachZaehlung(), f = faellige().length;
+      let h = '<div class="srcline">' + ids.length + ' freigeschaltete Karten · ' + f +
+              ' fällig · Karten entstehen automatisch aus jeder abgeschlossenen Lektion.</div>';
+      h += '<div class="itcards"><div class="itcard">' +
+           '<div class="c-kicker">Karteikasten</div>' +
+           '<div class="c-title">' + (f ? f + ' fällig' : 'Nichts fällig') + '</div>' +
+           '<div class="c-text">Gewusste Karten wandern ein Fach weiter und kommen später wieder, ' +
+           'unsichere landen zurück in Fach 1.</div>' +
+           '<div class="itboxes">' + z.map((n, i) => '<span>Fach ' + (i + 1) + ': ' + n + '</span>').join('') + '</div>' +
+           '<div class="c-act"><button class="itbtn" data-it-train="faellig"' + (f ? '' : ' disabled') +
+           '>Fällige üben</button>' +
+           '<button class="itbtn ghost" data-it-train="alle">Freies Üben</button>' +
+           '<button class="itbtn ghost" data-it-dir="1">Richtung: ' +
+           (P.richtung === 'it' ? 'Italienisch → Deutsch' : 'Deutsch → Italienisch') + '</button></div></div></div>';
+
+      if (!ids.length) {
+        h += '<div class="itempty">Noch keine Karten. Schließe Lektion 1 ab, dann füllt sich der Kasten.</div>';
+        el.innerHTML = h;
+        return;
+      }
+      h += '<input class="itsearch" id="it-voc-q" type="search" placeholder="Suchen …" value="' +
+           esc(vocFilter) + '">';
+      const q = vocFilter.trim().toLowerCase();
+      const zeilen = ids.map(id => ({ id: id, p: kartePaar(id) }))
+        .filter(x => !q || x.p.it.toLowerCase().indexOf(q) !== -1 || x.p.de.toLowerCase().indexOf(q) !== -1)
+        .sort((a, b) => a.p.lekt.nr - b.p.lekt.nr || a.p.it.localeCompare(b.p.it));
+      h += '<div class="itvoc">' + (zeilen.length ? zeilen.map(x =>
+        '<div class="itvline">' + tonKnopf(x.p.it) +
+        '<span class="v-it">' + esc(x.p.it) + '</span>' +
+        '<span class="v-de">' + esc(x.p.de) + '</span>' +
+        '<span class="v-box">L' + x.p.lekt.nr + ' · Fach ' + ((P.karten[x.id].f | 0) + 1) + '</span></div>'
+      ).join('') : '<div class="itempty">Kein Treffer.</div>') + '</div>';
+      el.innerHTML = h;
+      const inp = document.getElementById('it-voc-q');
+      if (inp) {
+        inp.addEventListener('input', () => {
+          vocFilter = inp.value;
+          const pos = inp.selectionStart;
+          zeichneWoerter();
+          const n = document.getElementById('it-voc-q');
+          if (n) { n.focus(); try { n.setSelectionRange(pos, pos); } catch (e) {} }
+        });
+      }
+    }
+
+    // ====================== Anstoß auf der Übersicht ======================
+    function zeichneAnstoss() {
+      const el = document.getElementById('it-nudge');
+      if (!el) return;
+      const s = serieAktuell(), f = faellige().length, nx = naechste(), ziel = zielErreicht();
+      const sdt = satzDesTages();
+      let kopf, sub;
+      if (ziel) {
+        kopf = 'Italienisch: heute erledigt ✓';
+        sub = 'Serie: ' + s + (s === 1 ? ' Tag' : ' Tage') + ' · ' + P.done.length + ' von ' + LK.length +
+              ' Lektionen. Noch Lust? Dann leg eine Lektion drauf.';
+      } else if (s > 0) {
+        kopf = 'Italienisch: ' + s + (s === 1 ? ' Tag' : ' Tage') + ' Serie – halte sie';
+        sub = 'Heute dran: Lektion ' + nx.nr + ' · ' + nx.titel +
+              (f ? ' · ' + f + ' Karten fällig' : '') + '. 15 Minuten genügen.';
+      } else if (P.done.length) {
+        kopf = 'Italienisch: zurück in die Serie';
+        sub = 'Lektion ' + nx.nr + ' · ' + nx.titel + (f ? ' · ' + f + ' Karten fällig' : '') +
+              '. Ein Tag reicht, um neu zu starten.';
+      } else {
+        kopf = 'Italienisch: leg los';
+        sub = 'Lektion 1 · ' + nx.titel + '. Danach kannst du dich vorstellen und einen Kaffee bestellen.';
+      }
+      el.className = 'itnudge' + (ziel ? ' done' : '');
+      el.innerHTML = '<div class="n-flame">' + (ziel ? '✅' : (s > 0 ? '🔥' : '🇮🇹')) + '</div>' +
+        '<div class="n-main"><div class="n-head">' + esc(kopf) + '</div>' +
+        '<div class="n-sub">' + esc(sub) + '</div>' +
+        (sdt ? '<div class="n-satz">Satz des Tages: „' + esc(sdt.it) + '“ – ' + esc(sdt.de) + '</div>' : '') +
+        '</div>' +
+        '<button class="itbtn" data-it-start="' + nx.nr + '">Lektion ' + nx.nr + '</button>' +
+        (f ? '<button class="itbtn ghost" data-it-train="faellig">' + f + ' Karten</button>' : '');
+    }
+
+    function alles() { zeichneAnstoss(); zeichneHeute(); zeichneKurs(); zeichneWoerter(); }
+
+    // ====================== Lektionsablauf ================================
+    const over = document.getElementById('it-over');
+    const sheet = document.getElementById('it-sheet');
+    let L = null, schritt = 0, quiz = [], qIdx = 0, qRichtig = 0, gezeigt = {};
+
+    function schliesse() {
+      if (over) over.classList.remove('on');
+      document.body.style.overflow = '';
+      if (window.speechSynthesis) { try { window.speechSynthesis.cancel(); } catch (e) {} }
+      L = null;
+      alles();
+    }
+    function oeffne(nr) {
+      L = LK.find(x => x.nr === Number(nr));
+      if (!L || !over || !sheet) return;
+      schritt = 0; gezeigt = {};
+      quizBauen();
+      over.classList.add('on');
+      document.body.style.overflow = 'hidden';
+      zeichneSchritt();
+    }
+
+    function quizBauen() {
+      // Aus den Wörtern der Lektion, Ablenker aus derselben Lektion plus
+      // früher gelernten Karten – so bleibt die Auswahl plausibel.
+      const eigen = (L.woerter || []).map(w => ({ it: w[0], de: w[1] }));
+      const fremd = [];
+      LK.forEach(l => {
+        if (l.nr !== L.nr && l.nr <= L.nr + 2) (l.woerter || []).forEach(w => fremd.push({ it: w[0], de: w[1] }));
+      });
+      const pool = eigen.slice();
+      quiz = mische(eigen).slice(0, Math.min(6, eigen.length)).map((q, i) => {
+        const nachIt = i % 2 === 1;   // abwechselnd beide Richtungen
+        const kandidaten = mische(pool.filter(x => x.it !== q.it).concat(mische(fremd).slice(0, 8)));
+        const falsch = [];
+        kandidaten.forEach(k => {
+          const w = nachIt ? k.it : k.de;
+          if (falsch.length < 3 && w !== (nachIt ? q.it : q.de) && falsch.indexOf(w) === -1) falsch.push(w);
+        });
+        const richtig = nachIt ? q.it : q.de;
+        return { frage: nachIt ? q.de : q.it, richtig: richtig,
+                 optionen: mische(falsch.concat([richtig])), nachIt: nachIt };
+      });
+      qIdx = 0; qRichtig = 0;
+    }
+    function mische(a) {
+      const b = a.slice();
+      for (let i = b.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const t = b[i]; b[i] = b[j]; b[j] = t;
+      }
+      return b;
+    }
+
+    const SCHRITTE = ['Wörter', 'Sätze', 'Grammatik', 'Quiz', 'Sprechen'];
+
+    function zeichneSchritt() {
+      if (!L) return;
+      const bl = BL.find(b => b.nr === L.block) || {};
+      let body = '', foot = '';
+      if (schritt === 0) {
+        body = '<h3>Neue Wörter · ' + (L.woerter || []).length + '</h3>' +
+          (L.woerter || []).map(w => '<div class="itpair">' + tonKnopf(w[0]) +
+            '<span class="p-it">' + esc(w[0]) + '</span><span class="p-de">' + esc(w[1]) + '</span></div>').join('') +
+          (hatTon ? '<div class="itfeed">Tipp: einmal auf 🔊 tippen, dann laut nachsprechen. Hören allein reicht nicht.</div>'
+                  : '');
+      } else if (schritt === 1) {
+        body = '<h3>Sätze, die du sofort benutzen kannst</h3>' +
+          (L.saetze || []).map(s => '<div class="itpair">' + tonKnopf(s[0]) +
+            '<span class="p-it">' + esc(s[0]) + '</span><span class="p-de">' + esc(s[1]) + '</span></div>').join('');
+      } else if (schritt === 2) {
+        const g = L.grammatik || {};
+        body = '<h3>Der eine Grammatikpunkt</h3><div class="itgram"><div class="g-t">' +
+               esc(g.titel || '') + '</div><div class="g-x">' + esc(g.text || '') + '</div></div>';
+      } else if (schritt === 3) {
+        if (qIdx >= quiz.length) {
+          body = '<div class="itdone"><div class="d-ic">' + (qRichtig === quiz.length ? '🎯' : '👍') + '</div>' +
+                 '<div class="d-t">' + qRichtig + ' von ' + quiz.length + ' richtig</div>' +
+                 '<div class="d-s">' + (qRichtig === quiz.length
+                   ? 'Alles sitzt. Weiter zur Sprechaufgabe.'
+                   : 'Gut genug. Die Karten holen den Rest über die nächsten Tage nach.') + '</div>' +
+                 '<div class="c-act" style="justify-content:center"><button class="itbtn ghost" data-it-requiz="1">' +
+                 'Quiz wiederholen</button></div></div>';
+        } else {
+          const q = quiz[qIdx];
+          body = '<div class="itq"><div class="q-n">Frage ' + (qIdx + 1) + ' von ' + quiz.length + ' · ' +
+                 (q.nachIt ? 'Wie heißt das auf Italienisch?' : 'Was heißt das auf Deutsch?') + '</div>' +
+                 '<div class="q-word">' + esc(q.frage) + '</div><div class="itopt">' +
+                 q.optionen.map(o => '<button data-it-ans="' + esc(o) + '">' + esc(o) + '</button>').join('') +
+                 '</div><div class="itfeed" id="it-feed"></div></div>';
+        }
+      } else {
+        body = '<h3>Sprechaufgabe</h3><div class="ittask"><div class="t-l">Laut sprechen – nicht denken, sprechen</div>' +
+               '<div class="t-x">' + esc(L.aufgabe || '') + '</div></div>' +
+               '<div class="itfeed">Nimm dich ruhig mit dem Handy auf und hör einmal rein. ' +
+               'Das ist der schnellste Weg zu sauberer Aussprache.</div>';
+      }
+
+      const zurueck = schritt > 0
+        ? '<button class="itbtn ghost" data-it-step="-1">Zurück</button>' : '';
+      if (schritt < 4) {
+        const sperre = (schritt === 3 && qIdx < quiz.length);
+        foot = zurueck + '<button class="itbtn" data-it-step="1"' + (sperre ? ' disabled' : '') + '>' +
+               (schritt === 3 ? 'Zur Sprechaufgabe' : 'Weiter') + '</button>' +
+               '<span class="sp">' + SCHRITTE[schritt] + '</span>';
+      } else {
+        foot = zurueck + '<button class="itbtn" data-it-finish="1">' +
+               (erledigt(L.nr) ? 'Erneut abschließen' : 'Lektion abschließen') + '</button>' +
+               '<span class="sp">' + SCHRITTE[schritt] + '</span>';
+      }
+
+      sheet.innerHTML = '<div class="s-head"><div><div class="s-kicker">Lektion ' + L.nr + ' · Block ' +
+        L.block + ' · ' + esc(bl.titel || '') + (L.nr % 12 === 0 ? ' · Meilenstein' : '') + '</div>' +
+        '<div class="s-title">' + esc(L.titel) + '</div></div>' +
+        '<button class="s-close" data-it-close="1" title="Schließen">✕</button></div>' +
+        '<div class="itsteps">' + SCHRITTE.map((_, i) =>
+          '<i class="' + (i <= schritt ? 'on' : '') + '"></i>').join('') + '</div>' +
+        '<div class="s-goal">' + esc(L.ziel) + '</div>' +
+        '<div class="s-body">' + body + '</div>' +
+        '<div class="s-foot">' + foot + '</div>';
+      sheet.scrollIntoView({ block: 'start' });
+    }
+
+    function abschliessen() {
+      if (!L) return;
+      if (!erledigt(L.nr)) P.done.push(L.nr);
+      kartenAnlegen(L);
+      P.tag.lekt = (P.tag.lekt || 0) + 1;
+      serieBuchen();
+      sichern();
+      const bi = blockInfo(L.block);
+      const bl = BL.find(b => b.nr === L.block) || {};
+      const blockFertig = bi.fertig === bi.gesamt;
+      const s = serieAktuell();
+      sheet.innerHTML = '<div class="s-head"><div><div class="s-kicker">Lektion ' + L.nr + ' abgeschlossen</div>' +
+        '<div class="s-title">' + esc(L.titel) + '</div></div>' +
+        '<button class="s-close" data-it-close="1" title="Schließen">✕</button></div>' +
+        '<div class="itdone"><div class="d-ic">' + (blockFertig ? '🏆' : '🎉') + '</div>' +
+        '<div class="d-t">' + (blockFertig ? 'Block ' + L.block + ' geschafft: „' + esc(bl.claim || '') + '“'
+                                           : P.done.length + ' von ' + LK.length + ' Lektionen') + '</div>' +
+        '<div class="d-s">Serie: ' + s + (s === 1 ? ' Tag' : ' Tage') + ' · ' +
+        ((L.woerter || []).length + (L.saetze || []).length) +
+        ' neue Karten liegen im Kasten und kommen ab morgen zur Wiederholung.</div></div>' +
+        '<div class="s-foot"><button class="itbtn" data-it-close="1">Fertig</button>' +
+        '<button class="itbtn ghost" data-it-train="faellig">Karten üben</button>' +
+        '<button class="itbtn ghost" data-it-start="' + Math.min(LK.length, L.nr + 1) +
+        '">Nächste Lektion</button></div>';
+    }
+
+    // ====================== Karteikasten-Training =========================
+    let queue = [], akt = null, offen = false, modus = 'faellig', sitzung = 0;
+
+    function trainStart(m) {
+      modus = m;
+      const alle = Object.keys(P.karten).filter(id => kartePaar(id));
+      queue = mische(m === 'faellig' ? faellige() : alle);
+      if (m === 'alle') queue = queue.slice(0, 30);
+      sitzung = 0;
+      if (!queue.length) {
+        if (!over || !sheet) return;
+        over.classList.add('on');
+        document.body.style.overflow = 'hidden';
+        sheet.innerHTML = '<div class="s-head"><div><div class="s-kicker">Karteikasten</div>' +
+          '<div class="s-title">Nichts zu üben</div></div>' +
+          '<button class="s-close" data-it-close="1">✕</button></div>' +
+          '<div class="itempty">Schließe zuerst eine Lektion ab – dann füllt sich der Kasten.</div>' +
+          '<div class="s-foot"><button class="itbtn" data-it-close="1">Zurück</button></div>';
+        return;
+      }
+      L = null;
+      over.classList.add('on');
+      document.body.style.overflow = 'hidden';
+      trainNext();
+    }
+    function trainNext() {
+      akt = queue.shift() || null;
+      offen = false;
+      trainZeichne();
+    }
+    function trainZeichne() {
+      if (!sheet) return;
+      if (!akt) {
+        const f = faellige().length;
+        sheet.innerHTML = '<div class="s-head"><div><div class="s-kicker">Karteikasten</div>' +
+          '<div class="s-title">Runde fertig</div></div>' +
+          '<button class="s-close" data-it-close="1">✕</button></div>' +
+          '<div class="itdone"><div class="d-ic">🧠</div><div class="d-t">' + sitzung +
+          (sitzung === 1 ? ' Karte' : ' Karten') + ' wiederholt</div>' +
+          '<div class="d-s">' + (f ? f + ' noch fällig.' : 'Alles aufgeholt – der Kasten ist leer.') +
+          ' Heute insgesamt: ' + P.tag.karten + '.</div></div>' +
+          '<div class="s-foot"><button class="itbtn" data-it-close="1">Fertig</button>' +
+          (f ? '<button class="itbtn ghost" data-it-train="faellig">Weiter üben</button>' : '') + '</div>';
+        return;
+      }
+      const p = kartePaar(akt);
+      if (!p) { trainNext(); return; }
+      const nachIt = P.richtung !== 'it';
+      const vorn = nachIt ? p.de : p.it;
+      const hinten = nachIt ? p.it : p.de;
+      sheet.innerHTML = '<div class="s-head"><div><div class="s-kicker">Karteikasten · ' +
+        (queue.length + 1) + ' in dieser Runde</div>' +
+        '<div class="s-title">Wiederholen</div></div>' +
+        '<button class="s-close" data-it-close="1" title="Schließen">✕</button></div>' +
+        '<div class="ittrain"><div class="tr-dir">' +
+        (nachIt ? 'Deutsch → Italienisch' : 'Italienisch → Deutsch') + '</div>' +
+        '<div class="tr-front">' + esc(vorn) + (nachIt ? '' : ' ' + tonKnopf(p.it)) + '</div>' +
+        '<div class="tr-back">' + (offen ? esc(hinten) + (nachIt ? ' ' + tonKnopf(p.it) : '') : '···') + '</div>' +
+        '<div class="tr-src">' + p.art + ' aus Lektion ' + p.lekt.nr + ' · Fach ' +
+        (((P.karten[akt] || {}).f | 0) + 1) + '</div>' +
+        '<div class="tr-act">' + (offen
+          ? '<button class="itbtn ghost" data-it-grade="0">Nochmal</button>' +
+            '<button class="itbtn" data-it-grade="1">Gewusst</button>'
+          : '<button class="itbtn" data-it-flip="1">Umdrehen</button>') + '</div></div>' +
+        '<div class="s-foot"><button class="itbtn ghost" data-it-close="1">Beenden</button>' +
+        '<span class="sp">' + sitzung + ' erledigt</span></div>';
+    }
+    function bewerten(gut) {
+      if (!akt) return;
+      const k = P.karten[akt] || { f: 0, d: heute() };
+      if (gut) {
+        k.f = Math.min(5, (k.f | 0) + 1);
+        k.d = plusTage(FACH_TAGE[k.f]);
+      } else {
+        k.f = 0;
+        k.d = heute();
+        queue.push(akt);          // kommt in dieser Runde noch einmal
+      }
+      P.karten[akt] = k;
+      sitzung++;
+      P.tag.karten = (P.tag.karten || 0) + 1;
+      serieBuchen();
+      sichern();
+      trainNext();
+    }
+
+    // ====================== Klicks ========================================
+    document.addEventListener('click', ev => {
+      const t = ev.target.closest('[data-say],[data-it-start],[data-it-go],[data-it-train],' +
+        '[data-it-step],[data-it-ans],[data-it-close],[data-it-finish],[data-it-flip],' +
+        '[data-it-grade],[data-it-requiz],[data-it-dir]');
+      if (!t) return;
+      const d = t.dataset;
+      if (d.say !== undefined) { ev.preventDefault(); sprich(d.say); return; }
+      if (d.itClose) { schliesse(); return; }
+      if (d.itGo) { zeigeIT(d.itGo); return; }
+      if (d.itDir) { P.richtung = P.richtung === 'it' ? 'de' : 'it'; sichern(); zeichneWoerter(); return; }
+      if (d.itStart) { oeffne(d.itStart); return; }
+      if (d.itTrain) { trainStart(d.itTrain); return; }
+      if (d.itFlip) { offen = true; trainZeichne(); return; }
+      if (d.itGrade !== undefined) { bewerten(d.itGrade === '1'); return; }
+      if (d.itRequiz) { quizBauen(); zeichneSchritt(); return; }
+      if (d.itStep) {
+        schritt = Math.max(0, Math.min(4, schritt + Number(d.itStep)));
+        zeichneSchritt();
+        return;
+      }
+      if (d.itFinish) { abschliessen(); return; }
+      if (d.itAns !== undefined) {
+        const q = quiz[qIdx];
+        if (!q || t.disabled) return;
+        const box = t.parentElement;
+        box.querySelectorAll('button').forEach(b => {
+          b.disabled = true;
+          if (b.dataset.itAns === q.richtig) b.classList.add('right');
+        });
+        const feed = document.getElementById('it-feed');
+        if (d.itAns === q.richtig) {
+          qRichtig++;
+          if (feed) { feed.textContent = 'Richtig.'; feed.className = 'itfeed ok'; }
+        } else {
+          t.classList.add('wrong');
+          if (feed) { feed.textContent = 'Richtig wäre: ' + q.richtig; feed.className = 'itfeed no'; }
+        }
+        if (q.nachIt) sprich(q.richtig);
+        qIdx++;
+        setTimeout(() => { if (L) zeichneSchritt(); }, 950);
+      }
+    });
+    document.addEventListener('keydown', ev => {
+      if (ev.key === 'Escape' && over && over.classList.contains('on')) schliesse();
+    });
+    if (over) over.addEventListener('click', ev => { if (ev.target === over) schliesse(); });
+
+    alles();
+  })();
+'''
+
+
 def build_html(tasks, done_today, events, cardshows, news, refresh_token,
                shows_note=None, releases=None, releases_note=None,
                trello=None, trello_note=None, podcast=None, podcast_note=None,
@@ -2469,6 +3289,11 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     date_line = f"{WD_LONG[today.weekday()]}, {today.day}. {MONTHS[today.month-1]} {today.year} · Stand {stand} Uhr"
     monday_iso = f"{monday.day}.–{week_days[6].day}. {MONTHS[week_days[6].month-1]} {week_days[6].year}"
 
+    # Der Lernstoff wandert als JSON in die Seite. Kein API-Aufruf, keine Kosten:
+    # Fortschritt, Quiz und Karteikasten laufen komplett im Browser.
+    it_course_json = json.dumps(ITALIAN_COURSE, ensure_ascii=False, separators=(",", ":"))
+    it_lekt_n = len(ITALIAN_COURSE.get("lektionen") or [])
+
     return f'''<!DOCTYPE html>
 <html lang="de">
 <head>
@@ -2481,6 +3306,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     --surface-1: #fcfcfb; --page: #f9f9f7; --text-primary: #0b0b0b; --text-secondary: #52514e;
     --muted: #898781; --hairline: #e1e0d9; --border: rgba(11,11,11,0.10);
     --privat: #1baf7a; --arbeit: #2a78d6; --studium: #4a3aa7; --trello: #eda100; --podcast: #008300; --focus: #0e7490;
+    --italiano: #1f9e5a;
     --good: #0ca30c; --good-text: #006300; --done-ink: #898781;
     --bad: #d03b3b; --bad-text: #b02525; --warn: #c98500;
   }}
@@ -2489,6 +3315,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
       --surface-1: #1a1a19; --page: #0d0d0d; --text-primary: #ffffff; --text-secondary: #c3c2b7;
       --muted: #898781; --hairline: #2c2c2a; --border: rgba(255,255,255,0.10);
       --privat: #199e70; --arbeit: #3987e5; --studium: #9085e9; --trello: #c98500; --podcast: #008300; --focus: #22a6c9; --good-text: #0ca30c;
+      --italiano: #2fb86e;
       --bad: #e05555; --bad-text: #f07878; --warn: #e0a52a;
     }}
   }}
@@ -2746,6 +3573,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   .wrain {{ font-size: 11.5px; color: var(--text-secondary); margin-top: 4px; }}
   footer {{ color: var(--muted); font-size: 12px; line-height: 1.5; border-top: 1px solid var(--hairline); padding-top: 12px; }}
   footer strong {{ color: var(--text-secondary); font-weight: 600; }}
+{IT_CSS}
 </style>
 </head>
 <body>
@@ -2765,9 +3593,11 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     <button data-view="view-markt">Markt</button>
     <button data-view="view-news">News</button>
     <button data-view="view-podcast">Podcast</button>
+    <button data-view="view-italiano">Italiano</button>
   </nav>
 
   <div id="view-today" class="view active">
+  <section id="it-nudge" class="itnudge"></section>
   <section class="panel focuspanel">
     <div class="panel-head"><h2>🎯 Fokus · heute &amp; diese Woche</h2></div>
     {day_focus_html}
@@ -2883,6 +3713,23 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     <div class="srcline">Quelle: <a href="{PODCAST_HOME}" target="_blank" rel="noopener">dashobby.podigee.io</a> (offizielles Transkript je Folge) · Stand {stand} Uhr · Durchwischen oder Pfeile für weitere Folgen</div>
     {podcast_body}
   </div>
+
+  <div id="view-italiano" class="view">
+    <h2 class="vtitle">Italiano · {it_lekt_n} Lektionen in 4 Blöcken</h2>
+    <nav class="subnav">
+      <button class="active" data-subview="sub-it-heute">Heute</button>
+      <button data-subview="sub-it-kurs">Kurs</button>
+      <button data-subview="sub-it-woerter">Vokabeln</button>
+    </nav>
+
+    <div id="sub-it-heute" class="subview active">
+      <div class="srcline">Lernbereich wird geladen …</div>
+    </div>
+    <div id="sub-it-kurs" class="subview"></div>
+    <div id="sub-it-woerter" class="subview"></div>
+  </div>
+
+  <div class="itover" id="it-over"><div class="itsheet" id="it-sheet"></div></div>
 
   <footer>
     <strong>Automatisch aktuell:</strong> Aufgaben pflegst du direkt in Todoist, Termine in Google Kalender.
@@ -3089,7 +3936,11 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     }}
     tick();
     setInterval(tick, 30000);
-  }})();{refresh_js}
+  }})();
+
+  // ---- Italienisch-Kurs: Lernstoff und Logik ----
+  window.ITCORSO = {it_course_json};
+{IT_JS}{refresh_js}
 </script>
 </body>
 </html>'''

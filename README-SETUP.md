@@ -6,12 +6,14 @@ Claude brauchst du nur noch für Design-Änderungen.
 
 ---
 
-## Schritt 1: Die zwei Dateien ins Repository bringen
+## Schritt 1: Die drei Dateien ins Repository bringen
 
-**a) `build_dashboard.py`** (das Bau-Skript)
+**a) `build_dashboard.py`** (das Bau-Skript) und **`italian_course.py`**
+(der Lernstoff des Italienisch-Kurses – eine reine Datendatei, liegt direkt
+neben dem Bau-Skript im Hauptordner des Repos)
 
 1. Repo `dashboard-mj-x7k2` auf github.com öffnen
-2. **Add file → Upload files** → `build_dashboard.py` aus diesem Paket hineinziehen
+2. **Add file → Upload files** → `build_dashboard.py` und `italian_course.py` aus diesem Paket hineinziehen
 3. **Commit directly to the main branch** → **Commit changes**
 
 **b) `.github/workflows/update.yml`** (der Zeitplan)
@@ -192,6 +194,34 @@ Listen, die auch tatsächlich Karten enthalten, damit es übersichtlich bleibt.
   Aufruf täglich (Zwischenspeicher `cache/industry.json`), egal wie oft der
   ⟳-Knopf gedrückt wird. Ohne `ANTHROPIC_API_KEY` bleibt die Rohliste
   vollständig nutzbar, nur die Kurzfassung fehlt.
+- **Italiano (Italienisch-Kurs):** Ein eigener Reiter mit drei Unterreitern.
+  **Heute** ist die Startseite: Tagesziel, Serie, fällige Karteikarten und der
+  „Satz des Tages". **Kurs** zeigt alle 48 Lektionen in 4 Blöcken à 12
+  (Fundament → Alltag → Business-Grundlagen → Feinschliff); jede Lektion ist
+  eine Portion von 15–20 Minuten, jede 12. Lektion ein **Meilenstein**, der den
+  Block abfragt. **Vokabeln** ist der Karteikasten. Eine Lektion läuft in fünf
+  Schritten ab (Wörter → Sätze → Grammatik → Quiz → Sprechen) und öffnet sich
+  als Overlay, damit die Seite ruhig bleibt; mit `Esc` jederzeit zu.
+  Das **Tagesziel** gilt als erfüllt, sobald entweder eine Lektion
+  abgeschlossen **oder** alle fälligen Karten wiederholt sind. Die **Serie**
+  bricht erst am Tag *nach* einem verpassten Tag – ein Tag Pause kostet also
+  nichts, solange am Folgetag gelernt wird. Der **Karteikasten** arbeitet nach
+  Leitner mit den Abständen 1/2/4/8/16/35 Tage: was sitzt, kommt seltener,
+  der Tagesaufwand sinkt also mit der Zeit von selbst. Die **Aussprache**
+  kommt über die Stimme deines Geräts (Web Speech, `it-IT`) – auf Lautsprecher
+  tippen, kein Download, keine externe Seite. Auf **Übersicht** steht oben eine
+  kleine Anstoß-Kachel mit dem heutigen Stand.
+  Wichtig: Der Kurs ist **komplett KI-frei** – Lernstoff, Quiz und Karteikasten
+  laufen im Browser. Er **kostet also nichts**, braucht **kein neues Secret**
+  und funktioniert auch ohne `ANTHROPIC_API_KEY`. Der Lernstoff liegt in der
+  Datei `italian_course.py`; sie lässt sich erweitern, ohne das Bau-Skript
+  anzufassen, und ist so abgesichert, dass ein Fehler darin das Dashboard nicht
+  lahmlegt (der Reiter bleibt dann nur leer).
+  Einschränkung: Der **Fortschritt liegt im Speicher des Browsers**
+  (`localStorage`), in dem du lernst – er übersteht die halbstündigen
+  Neubauten problemlos, wandert aber **nicht** zwischen Geräten. Lerne also
+  am besten immer im selben Browser; im privaten Modus geht der Stand beim
+  Schließen verloren.
 - **Woche – vor/zurück blättern:** Mit den Pfeilen links und rechts der
   Wochenanzeige beliebig weit in vergangene oder zukünftige Wochen blättern;
   „Diese Woche" springt jederzeit zur aktuellen Woche zurück.
