@@ -80,6 +80,31 @@ Listen, die auch tatsächlich Karten enthalten, damit es übersichtlich bleibt.
   Unterprojekte darunter (Fächer, Arbeitsprojekte …) sind beliebig und
   erscheinen als graue Zusatzzeile bei der Aufgabe. Priorität 1 (rot) in
   Todoist wird als „hoch" markiert.
+- **Aufgaben: Beschreibung aufklappen.** Hat eine Aufgabe in Todoist eine
+  Beschreibung (das Notizfeld unter dem Titel), erscheint hinter dem Titel ein
+  kleiner Pfeil. Ein Klick darauf klappt die Beschreibung auf, ein zweiter
+  wieder zu – dadurch bleibt die Liste so kurz wie vorher. Zeilenumbrüche
+  bleiben erhalten, Internetadressen darin werden zu klickbaren Links.
+  Aufgaben ohne Beschreibung bekommen keinen Pfeil.
+- **Aufgaben abhaken.** Das Kästchen links neben der Aufgabe ist jetzt ein
+  echter Knopf. Ein Klick streicht die Aufgabe durch, setzt ein grünes Häkchen,
+  zählt den Zähler „x offen" herunter – und schließt die Aufgabe **wirklich in
+  Todoist ab**. Der Weg dorthin: der Browser darf die Todoist-API nicht direkt
+  ansprechen, und der `TODOIST_TOKEN` soll die Seite ohnehin nie erreichen.
+  Stattdessen stößt der Klick denselben Workflow an wie der ⟳-Knopf, nur mit
+  der Zusatzangabe `close_tasks`; das Abschließen passiert dann serverseitig im
+  Lauf. Deshalb dauert es rund eineinhalb Minuten, bis die Aufgabe ganz
+  verschwindet – das Häkchen ist aber sofort sichtbar. **Ein neues Secret ist
+  nicht nötig**, es genügt der schon vorhandene `REFRESH_TOKEN`. Nochmal
+  klicken nimmt das Häkchen zurück, solange der Lauf noch nicht durch ist.
+  Klappt die Übertragung nicht (kein Netz, abgebrochener Lauf), bleibt das
+  Häkchen gesetzt und wird beim nächsten Laden der Seite automatisch erneut
+  versucht – höchstens dreimal, damit daraus keine Endlosschleife wird. Eine
+  Zeile unter den drei Aufgabenkarten sagt jeweils, was gerade passiert.
+  Zwei Grenzen: Die Kachel **„Heute erledigt"** kommt direkt aus Todoist und
+  zieht erst beim nächsten Lauf nach. Und die Kästchen an den **Trello-Karten**
+  sind weiterhin nur Deko – Trello-Karten lassen sich im Dashboard noch nicht
+  abhaken.
 - **Mehrere Kalender (z. B. „Privat", „Feiertage in Deutschland"):** Standardmäßig
   wird nur der eine in `ICS_URL` hinterlegte Kalender geladen. Um weitere
   Kalender zusätzlich anzuzeigen, für jeden gewünschten weiteren Kalender in

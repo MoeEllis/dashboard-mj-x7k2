@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "*/30 * * * *"   # alle 30 Minuten
   workflow_dispatch:          # manueller Start (⟳-Knopf / "Run workflow")
+    inputs:
+      close_tasks:
+        description: "Todoist-IDs zum Abschließen (kommagetrennt; setzt das Dashboard beim Abhaken selbst)"
+        required: false
+        default: ""
   push:
     branches: [main]
     paths:
@@ -37,6 +42,8 @@ jobs:
           ICS_URLS: ${{ secrets.ICS_URLS }}
           HOLIDAY_EXCLUDE: ${{ secrets.HOLIDAY_EXCLUDE }}
           TODOIST_TOKEN: ${{ secrets.TODOIST_TOKEN }}
+          # Aufgaben, die im Dashboard abgehakt wurden (leer bei Zeitplan/Push)
+          CLOSE_TASKS: ${{ github.event.inputs.close_tasks }}
           DASH_PASSWORD: ${{ secrets.DASH_PASSWORD }}
           REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
           TRELLO_KEY: ${{ secrets.TRELLO_KEY }}

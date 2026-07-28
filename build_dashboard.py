@@ -225,6 +225,37 @@ def fetch_todoist(token):
     return tasks, done_today
 
 
+def close_todoist_tasks(token, ids):
+    """Schließt Aufgaben in Todoist ab. Wird vom Häkchen im Dashboard ausgelöst.
+
+    Der Browser darf die Todoist-API nicht direkt ansprechen (kein CORS für
+    Anfragen mit Zugangsdaten), und der TODOIST_TOKEN soll die Seite ohnehin
+    nie erreichen. Stattdessen stößt ein Klick den Workflow mit der Eingabe
+    `close_tasks` an – hier, im Lauf auf dem Server, wird tatsächlich
+    geschlossen. Fehler einzelner IDs sind harmlos: der Browser merkt sich
+    offene Häkchen und versucht es beim nächsten Laden erneut.
+    """
+    import requests
+    H = {"Authorization": f"Bearer {token}", **UA}
+    ok, fehler = 0, 0
+    for tid in ids:
+        try:
+            r = requests.post(f"https://api.todoist.com/api/v1/tasks/{tid}/close",
+                              headers=H, timeout=20)
+            # 204 = geschlossen. 404/410 = war schon weg, zählt auch als Erfolg.
+            if r.status_code in (200, 204, 404, 410):
+                ok += 1
+            else:
+                fehler += 1
+                print(f"Hinweis: Aufgabe {tid} nicht geschlossen (HTTP {r.status_code}).")
+        except Exception as e:
+            fehler += 1
+            print(f"Hinweis: Aufgabe {tid} nicht geschlossen ({e}).")
+    print(f"Todoist: {ok} Aufgabe(n) abgeschlossen"
+          + (f", {fehler} fehlgeschlagen" if fehler else ""))
+    return ok
+
+
 def map_todoist(projects, raw_tasks):
     """Ordnet Todoist-Aufgaben den drei Lebensbereichen zu."""
     by_id = {p["id"]: p for p in projects}
@@ -250,7 +281,12 @@ def map_todoist(projects, raw_tasks):
             due = t["due"]["date"][:10]
         tasks.append({
             "area": area,
+            # Die Todoist-ID wird gebraucht, um die Aufgabe später per Klick im
+            # Dashboard wirklich in Todoist abschließen zu können.
+            "id": str(t.get("id") or ""),
             "content": t.get("content", ""),
+            # Todoist nennt das Notizfeld "description". Es kann mehrzeilig sein.
+            "beschreibung": (t.get("description") or "").strip(),
             "project": proj["name"] if proj["id"] != top["id"] else None,
             "due": due,
             "prio_hoch": t.get("priority", 1) >= 4,
@@ -1581,9 +1617,13 @@ def enrich_releases(releases, own_brands):
 # ------------------------------------------------------------- Testdaten ---
 def testdata(today):
     tasks = [
-        {"area": "Privat", "content": "Einkauf für die Woche planen", "project": None, "due": today.isoformat(), "prio_hoch": False},
-        {"area": "Arbeit", "content": "Wochenplanung: Top-3-Prioritäten", "project": "Projekt Alpha", "due": today.isoformat(), "prio_hoch": True},
-        {"area": "Studium", "content": "Übungsblatt bearbeiten", "project": "Mathe II", "due": (today + timedelta(days=3)).isoformat(), "prio_hoch": True},
+        {"area": "Privat", "id": "9001", "content": "Einkauf für die Woche planen", "project": None,
+         "beschreibung": "", "due": today.isoformat(), "prio_hoch": False},
+        {"area": "Arbeit", "id": "9002", "content": "Wochenplanung: Top-3-Prioritäten", "project": "Projekt Alpha",
+         "beschreibung": "Zuerst die Releases prüfen.\nDanach mit Vertrieb abstimmen: https://example.com/plan",
+         "due": today.isoformat(), "prio_hoch": True},
+        {"area": "Studium", "id": "9003", "content": "Übungsblatt bearbeiten", "project": "Mathe II",
+         "beschreibung": "Aufgaben 3 bis 7, Abgabe im Portal.", "due": (today + timedelta(days=3)).isoformat(), "prio_hoch": True},
     ]
     events = [
         {"date": (today + timedelta(days=3)).isoformat(), "end_date": (today + timedelta(days=3)).isoformat(),
@@ -2715,6 +2755,175 @@ IT_JS = '''
 '''
 
 
+def desc_to_html(txt):
+    """Aufgaben-Beschreibung als HTML: Zeilenumbrüche bleiben, Links werden klickbar.
+
+    Erst wird nach Adressen gesucht, dann escaped – nie umgekehrt, sonst
+    zerlegt das Escaping die Adresse.
+    """
+    zeilen = []
+    for line in txt.splitlines():
+        teile, pos = [], 0
+        for m in re.finditer(r"https?://[^\s<>\"']+", line):
+            u = m.group(0).rstrip(".,;:!?)")
+            teile.append(esc(line[pos:m.start()]))
+            teile.append(f'<a href="{esc(u)}" target="_blank" rel="noopener">{esc(u)}</a>')
+            pos = m.start() + len(u)
+        teile.append(esc(line[pos:]))
+        zeilen.append("".join(teile))
+    return "<br>".join(zeilen)
+
+
+# Aufgaben: aufklappbare Beschreibung und ein Häkchen, das wirklich abhakt.
+# Als eigene Konstanten geschrieben, weil die große Vorlage ein f-String ist –
+# hier dürfen geschweifte Klammern also einfach bleiben.
+TASK_CSS = '''
+  /* Aufgabenzeile: Kopfzeile plus optional aufklappbare Beschreibung */
+  ul.tasks li.tsk { display: block; padding: 0; }
+  ul.tasks li.tsk .trow { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0; }
+  /* Das Häkchen ist jetzt ein echter Knopf, nicht mehr nur Deko. */
+  ul.tasks li.tsk .box { flex: 0 0 18px; width: 18px; height: 18px; margin-top: 1px;
+    border: 1.5px solid var(--muted); border-radius: 5px; background: none; padding: 0;
+    cursor: pointer; position: relative; -webkit-appearance: none; appearance: none;
+    transition: border-color .12s, background .12s; }
+  ul.tasks li.tsk .box:hover { border-color: var(--italiano); }
+  ul.tasks li.tsk .box:focus-visible { outline: 2px solid var(--italiano); outline-offset: 2px; }
+  ul.tasks li.tsk.done .box { background: var(--italiano); border-color: var(--italiano); }
+  ul.tasks li.tsk.done .box::after { content: '✓'; position: absolute; inset: 0; color: #fff;
+    font-size: 12px; line-height: 15px; text-align: center; font-weight: 700; }
+  ul.tasks li.tsk.done .txt { text-decoration: line-through; color: var(--muted); }
+  ul.tasks li.tsk.done .prio { display: none; }
+  .tdtog { flex: 0 0 auto; background: none; border: none; color: var(--muted); cursor: pointer;
+    font-size: 15px; line-height: 1; padding: 2px 5px; border-radius: 4px;
+    transition: transform .15s ease, color .12s; }
+  .tdtog:hover { color: var(--text-secondary); }
+  .tdtog[aria-expanded="true"] { transform: rotate(180deg); }
+  .tdesc { padding: 0 4px 10px 28px; font-size: 13px; line-height: 1.55;
+    color: var(--text-secondary); overflow-wrap: anywhere; }
+  .tdesc a { color: inherit; text-decoration: underline; }
+  .tsync { font-size: 12px; color: var(--muted); margin: -4px 0 14px; min-height: 1em; }
+  .tsync.warn { color: var(--bad-text); }
+'''
+
+TASK_JS = '''
+  // ---- Aufgaben: Beschreibung aufklappen, Häkchen setzen, in Todoist schließen ----
+  (() => {
+    const SCHLUESSEL = 'task_done_v1';
+    const MAX_VERSUCHE = 3;   // Schutz gegen endloses Neuladen
+
+    const laden = () => {
+      try { return JSON.parse(localStorage.getItem(SCHLUESSEL)) || {}; }
+      catch (e) { return {}; }
+    };
+    const sichern = (s) => {
+      try { localStorage.setItem(SCHLUESSEL, JSON.stringify(s)); } catch (e) {}
+    };
+
+    let stand = laden();
+    const alleTasks = () => Array.from(document.querySelectorAll('li.tsk[data-tid]'));
+
+    // Aufräumen: Was nicht mehr auf der Seite steht, ist in Todoist wirklich
+    // geschlossen. Die Notiz dazu kann weg, sonst wächst der Speicher endlos.
+    (() => {
+      const da = new Set(alleTasks().map(li => li.dataset.tid));
+      let weg = false;
+      Object.keys(stand).forEach(id => { if (!da.has(id)) { delete stand[id]; weg = true; } });
+      if (weg) sichern(stand);
+    })();
+
+    function zaehler() {
+      document.querySelectorAll('.area').forEach(a => {
+        const z = a.querySelector('.count[data-offen]');
+        if (!z) return;
+        z.textContent = a.querySelectorAll('li.tsk:not(.done)').length + ' offen';
+      });
+    }
+
+    function zeichnen() {
+      alleTasks().forEach(li => {
+        const fertig = !!stand[li.dataset.tid];
+        li.classList.toggle('done', fertig);
+        const box = li.querySelector('.box');
+        if (box) {
+          box.setAttribute('aria-checked', fertig ? 'true' : 'false');
+          box.setAttribute('aria-label', fertig ? 'Häkchen zurücknehmen' : 'Als erledigt markieren');
+        }
+      });
+      zaehler();
+    }
+
+    // --- Echtes Abschließen: der Browser darf die Todoist-API nicht direkt
+    // ansprechen, also stößt er den Workflow an, der es serverseitig macht.
+    const cfg = window.DASHCFG || {};
+    const meldung = document.getElementById('tasksync');
+    let timer = null;
+
+    function sage(text, warnen) {
+      if (!meldung) return;
+      meldung.textContent = text || '';
+      meldung.classList.toggle('warn', !!warnen);
+    }
+
+    const offeneIds = () =>
+      Object.keys(stand).filter(id => (stand[id].versuche || 0) < MAX_VERSUCHE);
+
+    async function senden() {
+      const ids = offeneIds();
+      if (!ids.length) return;
+      if (!cfg.rt) {
+        sage('Häkchen ist hier gesetzt, wird aber nicht nach Todoist übertragen.', true);
+        return;
+      }
+      ids.forEach(id => { stand[id].versuche = (stand[id].versuche || 0) + 1; });
+      sichern(stand);
+      sage('Wird in Todoist abgeschlossen – die Seite lädt in ~90 s neu.');
+      try {
+        const r = await fetch('https://api.github.com/repos/' + cfg.repo +
+                              '/actions/workflows/update.yml/dispatches', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + cfg.rt, 'Accept': 'application/vnd.github+json' },
+          body: JSON.stringify({ ref: 'main', inputs: { close_tasks: ids.join(',') } })
+        });
+        if (r.status === 204) { setTimeout(() => location.reload(), 90000); }
+        else { sage('Todoist nicht erreicht (' + r.status + '). Häkchen bleibt hier gesetzt.', true); }
+      } catch (e) {
+        sage('Keine Verbindung. Häkchen bleibt gesetzt, nächster Versuch beim Neuladen.', true);
+      }
+    }
+
+    function anstossen() { clearTimeout(timer); timer = setTimeout(senden, 2500); }
+
+    document.addEventListener('click', (e) => {
+      const box = e.target.closest('li.tsk .box');
+      if (box) {
+        const id = box.closest('li.tsk').dataset.tid;
+        if (stand[id]) { delete stand[id]; } else { stand[id] = { versuche: 0 }; }
+        sichern(stand);
+        zeichnen();
+        if (offeneIds().length) { anstossen(); }
+        else { clearTimeout(timer); sage(''); }
+        return;
+      }
+      const tog = e.target.closest('.tdtog');
+      if (tog) {
+        const li = tog.closest('li.tsk');
+        const d = li && li.querySelector('.tdesc');
+        if (!d) return;
+        const auf = d.hasAttribute('hidden');
+        if (auf) { d.removeAttribute('hidden'); } else { d.setAttribute('hidden', ''); }
+        tog.setAttribute('aria-expanded', auf ? 'true' : 'false');
+        tog.setAttribute('aria-label', auf ? 'Beschreibung ausblenden' : 'Beschreibung anzeigen');
+      }
+    });
+
+    zeichnen();
+    // Ein abgebrochener Lauf heilt sich beim nächsten Laden von selbst –
+    // begrenzt durch MAX_VERSUCHE, damit daraus keine Schleife wird.
+    if (offeneIds().length) anstossen();
+  })();
+'''
+
+
 def build_html(tasks, done_today, events, cardshows, news, refresh_token,
                shows_note=None, releases=None, releases_note=None,
                trello=None, trello_note=None, podcast=None, podcast_note=None,
@@ -2768,11 +2977,24 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
             meta = " · ".join(x for x in [t["project"], due_label(t["due"]) if t["due"] else None] if x)
             meta_html = f'<span class="meta">{esc(meta)}</span>' if meta else ""
             prio = '<span class="prio hoch">hoch</span>' if t["prio_hoch"] else ""
-            items.append(f'<li><span class="box"></span><span class="txt">{esc(t["content"])}{meta_html}</span>{prio}</li>')
+            tid = esc(str(t.get("id") or ""))
+            beschr = (t.get("beschreibung") or "").strip()
+            # Der Pfeil erscheint nur, wenn es überhaupt eine Beschreibung gibt –
+            # so bleibt die Liste bei Aufgaben ohne Notiz genauso ruhig wie vorher.
+            toggle = ('<button class="tdtog" type="button" aria-expanded="false"'
+                      ' aria-label="Beschreibung anzeigen">⌄</button>') if beschr else ""
+            desc_html = f'<div class="tdesc" hidden>{desc_to_html(beschr)}</div>' if beschr else ""
+            items.append(
+                f'<li class="tsk" data-tid="{tid}">'
+                f'<div class="trow">'
+                f'<button class="box" type="button" role="checkbox" aria-checked="false"'
+                f' aria-label="Als erledigt markieren"></button>'
+                f'<span class="txt">{esc(t["content"])}{meta_html}</span>{toggle}{prio}'
+                f'</div>{desc_html}</li>')
         body = "\n".join(items) if items else '<li class="none">Keine offenen Aufgaben 🎉</li>'
         area_cards.append(f'''
     <div class="area {area_var[area]}">
-      <div class="area-head"><h2><span class="dot"></span>{area}</h2><span class="count">{len(atasks)} offen</span></div>
+      <div class="area-head"><h2><span class="dot"></span>{area}</h2><span class="count" data-offen>{len(atasks)} offen</span></div>
       <ul class="tasks">{body}</ul>
     </div>''')
 
@@ -3574,6 +3796,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   footer {{ color: var(--muted); font-size: 12px; line-height: 1.5; border-top: 1px solid var(--hairline); padding-top: 12px; }}
   footer strong {{ color: var(--text-secondary); font-weight: 600; }}
 {IT_CSS}
+{TASK_CSS}
 </style>
 </head>
 <body>
@@ -3617,6 +3840,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
   </section>
   <section class="areas">{"".join(area_cards)}
   </section>
+  <div class="tsync" id="tasksync"></div>
   <section class="trellowrap">
     <div class="trello-head"><h2>🗂️ Trello</h2><span class="count">{trello_total} offen</span></div>
     {trello_html}
@@ -3940,7 +4164,10 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
 
   // ---- Italienisch-Kurs: Lernstoff und Logik ----
   window.ITCORSO = {it_course_json};
-{IT_JS}{refresh_js}
+{IT_JS}
+  // Für das Abhaken der Aufgaben: Repo und der bereits vorhandene Actions-Token.
+  window.DASHCFG = {{ repo: {json.dumps(REPO)}, rt: {json.dumps(refresh_token or "")} }};
+{TASK_JS}{refresh_js}
 </script>
 </body>
 </html>'''
@@ -4098,6 +4325,18 @@ def main():
         trello_key = (os.environ.get("TRELLO_KEY") or "").strip()
         trello_token = (os.environ.get("TRELLO_TOKEN") or "").strip()
         anthropic_key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        # Häkchen aus dem Dashboard: kommen als Workflow-Eingabe an und werden
+        # VOR dem Laden geschlossen, damit sie in der neuen Seite nicht mehr
+        # auftauchen. Maximal 50 pro Lauf, damit ein kaputter Wert nicht in
+        # eine lange Schleife läuft.
+        close_raw = (os.environ.get("CLOSE_TASKS") or "").strip()
+        close_ids = [x.strip() for x in close_raw.replace("\n", ",").split(",")
+                     if x.strip().isdigit() or (x.strip() and x.strip().isalnum())][:50]
+        if close_ids and token:
+            close_todoist_tasks(token, close_ids)
+        elif close_ids:
+            print("Hinweis: Häkchen erhalten, aber kein TODOIST_TOKEN gesetzt.")
+
         tasks, done_today = fetch_todoist(token) if token else ([], 0)
         if ics_list:
             y0, m0 = ym_add(today.year, today.month, -1)
