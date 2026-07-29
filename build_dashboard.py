@@ -1945,6 +1945,165 @@ except Exception as _it_err:            # pragma: no cover - Schutzschicht
     print(f"Hinweis: Italienisch-Kurs nicht geladen ({_it_err}).")
     ITALIAN_COURSE = {"bloecke": [], "lektionen": [], "aussprache": []}
 
+
+# --- Lernstand über alle Geräte ----------------------------------------------
+# Der Fortschritt liegt weiterhin im Browser (schnell, offline nutzbar), wird
+# aber zusätzlich in cache/italiano.json gehalten. Damit sieht das Handy, was
+# am Rechner gelernt wurde. Weg: Der Browser stößt den Workflow mit seinem
+# Stand an (der vorhandene Actions-Token genügt, kein neues Geheimnis), der
+# Lauf führt beide Stände zusammen und backt das Ergebnis in die Seite.
+IT_KARTE_ID = re.compile(r"^[WS][0-9]{1,3}-[0-9]{1,3}$")
+IT_DATUM = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+IT_STAND_TXT = re.compile(r"^[0-9.: ]{0,20}$")
+IT_MAX_KARTEN = 4000
+
+
+def _it_leer():
+    return {"done": [], "karten": {}, "serie": {"n": 0, "best": 0, "letzter": ""},
+            "tag": {"d": "", "lekt": 0, "karten": 0}, "richtung": "it"}
+
+
+def _it_zahl(v, lo, hi):
+    try:
+        n = int(v)
+    except Exception:
+        return lo
+    return max(lo, min(hi, n))
+
+
+def _it_datum(v):
+    v = str(v or "")
+    return v if IT_DATUM.match(v) else ""
+
+
+def it_clean(raw):
+    """Einen Lernstand auf das erlaubte Format eindampfen.
+
+    Diese Daten kommen aus dem Browser und werden später in die Seite gebacken.
+    Deshalb bleiben nur bekannte Schlüssel übrig, und zwar ausschließlich als
+    Zahlen und ISO-Datumsangaben – so kann kein fremder Text in die Seite
+    gelangen. Rückgabe None heißt: unlesbar, bitte ignorieren.
+    """
+    if isinstance(raw, (str, bytes)):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            return None
+    if not isinstance(raw, dict):
+        return None
+    gueltig = {l.get("nr") for l in (ITALIAN_COURSE.get("lektionen") or [])}
+    done = []
+    roh_done = raw.get("done")
+    if isinstance(roh_done, list):
+        for x in roh_done[:500]:
+            try:
+                n = int(x)
+            except Exception:
+                continue
+            if n in gueltig and n not in done:
+                done.append(n)
+    karten = {}
+    roh_k = raw.get("karten")
+    if isinstance(roh_k, dict):
+        for k in sorted(str(x) for x in roh_k.keys())[:IT_MAX_KARTEN]:
+            if not IT_KARTE_ID.match(k):
+                continue
+            v = roh_k.get(k)
+            if not isinstance(v, dict):
+                continue
+            d = _it_datum(v.get("d"))
+            if not d:
+                continue
+            karten[k] = {"f": _it_zahl(v.get("f"), 0, 5), "d": d}
+    serie = raw.get("serie") if isinstance(raw.get("serie"), dict) else {}
+    tag = raw.get("tag") if isinstance(raw.get("tag"), dict) else {}
+    return {
+        "done": sorted(done),
+        "karten": karten,
+        "serie": {"n": _it_zahl(serie.get("n"), 0, 9999),
+                  "best": _it_zahl(serie.get("best"), 0, 9999),
+                  "letzter": _it_datum(serie.get("letzter"))},
+        "tag": {"d": _it_datum(tag.get("d")),
+                "lekt": _it_zahl(tag.get("lekt"), 0, 999),
+                "karten": _it_zahl(tag.get("karten"), 0, 9999)},
+        "richtung": "de" if raw.get("richtung") == "de" else "it",
+    }
+
+
+def it_merge(alt, neu):
+    """Zwei Lernstände vereinigen – nichts geht verloren.
+
+    Absichtlich keine Regel "der letzte gewinnt": wenn Rechner und Handy
+    unabhängig voneinander gelernt haben, sollen beide Fortschritte erhalten
+    bleiben. `neu` gilt als der frischere Stand und entscheidet nur bei
+    echtem Gleichstand.
+    """
+    a = it_clean(alt) or _it_leer()
+    b = it_clean(neu) or _it_leer()
+
+    karten = {}
+    for k in sorted(set(a["karten"]) | set(b["karten"])):
+        x, y = a["karten"].get(k), b["karten"].get(k)
+        if not x:
+            karten[k] = y
+        elif not y:
+            karten[k] = x
+        elif y["f"] != x["f"]:
+            # Höheres Leitner-Fach heißt: auf dem anderen Gerät schon besser
+            # gelernt. Das gewinnt, sonst würde Wiederholtes zurückfallen.
+            karten[k] = y if y["f"] > x["f"] else x
+        else:
+            karten[k] = y if y["d"] >= x["d"] else x
+
+    sa, sb = a["serie"], b["serie"]
+    if sa["letzter"] == sb["letzter"]:
+        s_n, s_letzt = max(sa["n"], sb["n"]), sa["letzter"]
+    elif sb["letzter"] > sa["letzter"]:
+        s_n, s_letzt = sb["n"], sb["letzter"]
+    else:
+        s_n, s_letzt = sa["n"], sa["letzter"]
+
+    ta, tb = a["tag"], b["tag"]
+    if ta["d"] == tb["d"]:
+        tag = {"d": ta["d"], "lekt": max(ta["lekt"], tb["lekt"]),
+               "karten": max(ta["karten"], tb["karten"])}
+    else:
+        tag = dict(tb if tb["d"] > ta["d"] else ta)
+
+    return {
+        "done": sorted(set(a["done"]) | set(b["done"])),
+        "karten": karten,
+        "serie": {"n": s_n, "best": max(sa["best"], sb["best"], s_n), "letzter": s_letzt},
+        "tag": tag,
+        "richtung": (b if neu else a)["richtung"],
+    }
+
+
+def it_sync(eingang):
+    """Gespeicherten Lernstand laden, einen eingegangenen einmischen, ablegen.
+
+    Gibt den Stand zurück, der in die Seite gebacken wird.
+    """
+    gespeichert = load_cache("italiano") or {}
+    stand = it_clean(gespeichert) or _it_leer()
+    zeit = str(gespeichert.get("stand") or "")
+    stand["stand"] = zeit if IT_STAND_TXT.match(zeit) else ""
+
+    eingang = (eingang or "").strip()
+    if not eingang:
+        return stand
+    neu = it_clean(eingang)
+    if neu is None:
+        print("Hinweis: Italienisch-Stand aus dem Browser war unlesbar – ignoriert.")
+        return stand
+    zusammen = it_merge(stand, neu)
+    zusammen["stand"] = datetime.now(TZ).strftime("%d.%m.%Y %H:%M")
+    save_cache("italiano", zusammen)
+    print(f"Italienisch-Stand abgeglichen: {len(zusammen['done'])} Lektionen, "
+          f"{len(zusammen['karten'])} Karten, Serie {zusammen['serie']['n']}.")
+    return zusammen
+
+
 # CSS und JS des Reiters stehen absichtlich als eigene Klartext-Bausteine hier
 # und nicht in der großen f-String-Vorlage von build_html: dort müsste jede
 # Klammer verdoppelt werden, was bei diesem Umfang unweigerlich zu Fehlern
@@ -2100,11 +2259,16 @@ IT_CSS = '''
   .itboxes span { font-size: 11px; color: var(--text-secondary); background: var(--surface-1); border: 1px solid var(--border);
                   border-radius: 99px; padding: 3px 9px; font-variant-numeric: tabular-nums; }
   .itempty { font-size: 13px; color: var(--muted); padding: 18px 0; text-align: center; }
+  /* Eine ruhige Zeile: sie sagt, ob der Stand über die Geräte hinweg sitzt. */
+  .itsync { font-size: 12px; color: var(--muted); margin: -6px 0 14px; min-height: 1em; }
+  .itsync.warn { color: var(--bad-text); }
 '''
 
 # Der Lernbereich läuft vollständig im Browser: kein Netz, kein API-Schlüssel,
-# keine Kosten. Der Fortschritt liegt in localStorage – er übersteht die
-# 30-Minuten-Neubauten, ist aber an Gerät und Browser gebunden.
+# keine Kosten. Der Fortschritt liegt in localStorage und übersteht die
+# 30-Minuten-Neubauten. Zusätzlich wird er über den Workflow mit
+# cache/italiano.json abgeglichen, damit Rechner und Handy denselben Stand
+# sehen (siehe it_sync oben).
 IT_JS = '''
   // ------------------------------------------------------- Italienisch ---
   (function () {
@@ -2131,22 +2295,179 @@ IT_JS = '''
       return Math.round((new Date(b + 'T00:00:00') - new Date(a + 'T00:00:00')) / 86400000);
     }
 
-    const leer = { done: [], karten: {}, serie: { n: 0, best: 0, letzter: '' },
-                   tag: { d: '', lekt: 0, karten: 0 }, richtung: 'it' };
-    let P = leer;
-    try {
-      const raw = localStorage.getItem(KEY);
-      if (raw) P = Object.assign({}, leer, JSON.parse(raw));
-      P.serie = Object.assign({ n: 0, best: 0, letzter: '' }, P.serie || {});
-      P.tag = Object.assign({ d: '', lekt: 0, karten: 0 }, P.tag || {});
-      if (!Array.isArray(P.done)) P.done = [];
-      if (!P.karten || typeof P.karten !== 'object') P.karten = {};
-    } catch (e) { P = JSON.parse(JSON.stringify(leer)); }
-    if (P.tag.d !== heute()) P.tag = { d: heute(), lekt: 0, karten: 0 };
+    function leer() {
+      return { done: [], karten: {}, serie: { n: 0, best: 0, letzter: '' },
+               tag: { d: '', lekt: 0, karten: 0 }, richtung: 'it' };
+    }
+    // Jeden Stand – ob aus dem Browser oder vom Server – auf die gleiche Form
+    // bringen. Danach darf der Rest des Codes ohne Prüfungen darauf zugreifen.
+    function formen(x) {
+      const o = leer();
+      if (!x || typeof x !== 'object') return o;
+      if (Array.isArray(x.done)) {
+        x.done.forEach(n => { n = Number(n); if (n && o.done.indexOf(n) === -1) o.done.push(n); });
+      }
+      if (x.karten && typeof x.karten === 'object') {
+        Object.keys(x.karten).forEach(k => {
+          const v = x.karten[k];
+          if (v && typeof v === 'object' && v.d) o.karten[k] = { f: v.f | 0, d: String(v.d) };
+        });
+      }
+      const s = x.serie || {}, t = x.tag || {};
+      o.serie = { n: s.n | 0, best: s.best | 0, letzter: String(s.letzter || '') };
+      o.tag = { d: String(t.d || ''), lekt: t.lekt | 0, karten: t.karten | 0 };
+      o.richtung = x.richtung === 'de' ? 'de' : 'it';
+      return o;
+    }
 
-    function sichern() {
+    // Zwei Stände vereinigen. Bewusst kein "der letzte gewinnt": wenn auf
+    // Rechner und Handy unabhängig gelernt wurde, bleibt beides erhalten.
+    // b ist der frischere Stand und entscheidet nur bei echtem Gleichstand.
+    // Diese Regeln stehen genauso in it_merge() im Python-Teil.
+    // (Nicht "mische" nennen – das ist weiter unten das Mischen der Quiz-Antworten.)
+    function vereinen(a, b) {
+      const done = a.done.slice();
+      b.done.forEach(n => { if (done.indexOf(n) === -1) done.push(n); });
+      done.sort((x, y) => x - y);
+      const karten = {};
+      Object.keys(a.karten).concat(Object.keys(b.karten)).forEach(k => {
+        if (karten[k]) return;
+        const x = a.karten[k], y = b.karten[k];
+        if (!x) { karten[k] = y; return; }
+        if (!y) { karten[k] = x; return; }
+        // Höheres Leitner-Fach heißt: auf dem anderen Gerät besser gelernt.
+        if (y.f !== x.f) { karten[k] = y.f > x.f ? y : x; return; }
+        karten[k] = y.d >= x.d ? y : x;
+      });
+      const sa = a.serie, sb = b.serie;
+      let sn, sl;
+      if (sa.letzter === sb.letzter) { sn = Math.max(sa.n, sb.n); sl = sa.letzter; }
+      else if (sb.letzter > sa.letzter) { sn = sb.n; sl = sb.letzter; }
+      else { sn = sa.n; sl = sa.letzter; }
+      const ta = a.tag, tb = b.tag;
+      const tag = ta.d === tb.d
+        ? { d: ta.d, lekt: Math.max(ta.lekt, tb.lekt), karten: Math.max(ta.karten, tb.karten) }
+        : Object.assign({}, tb.d > ta.d ? tb : ta);
+      return { done: done, karten: karten,
+               serie: { n: sn, best: Math.max(sa.best, sb.best, sn), letzter: sl },
+               tag: tag, richtung: b.richtung };
+    }
+
+    // Fingerabdruck zum Vergleich: Was der Server hat, gegen das, was hier
+    // liegt. Die Blickrichtung bleibt außen vor – die ist Gerätesache.
+    function abdruck(x) {
+      const k = {};
+      Object.keys(x.karten).sort().forEach(id => { k[id] = [x.karten[id].f, x.karten[id].d]; });
+      return JSON.stringify([x.done.slice().sort((a, b) => a - b), k,
+                             [x.serie.n, x.serie.best, x.serie.letzter],
+                             [x.tag.d, x.tag.lekt, x.tag.karten]]);
+    }
+
+    let P;
+    try { P = formen(JSON.parse(localStorage.getItem(KEY) || 'null')); }
+    catch (e) { P = leer(); }
+
+    // --- Server-Stand einmischen -------------------------------------------
+    const fern = window.ITSTAND && typeof window.ITSTAND === 'object' ? window.ITSTAND : null;
+    const fernZeit = fern ? String(fern.stand || '') : '';
+    // Der Vergleich läuft vor dem Tageswechsel weiter unten: ein neuer Tag
+    // allein ist kein Grund, den Server anzufunken.
+    const F = formen(fern);
+    if (fern) P = vereinen(F, P);   // der lokale Stand gilt als der frischere
+    let nachzutragen = abdruck(P) !== abdruck(F);
+    if (P.tag.d !== heute()) P.tag = { d: heute(), lekt: 0, karten: 0 };
+    // Was vom Server dazukam, gehört sofort in den Speicher dieses Geräts –
+    // sonst wäre es nach dem Wegklicken wieder weg. Bewusst ohne Anstoß: der
+    // folgt unten nur, wenn sich die Stände wirklich unterscheiden.
+    merken();
+
+    function merken() {
       try { localStorage.setItem(KEY, JSON.stringify(P)); } catch (e) {}
     }
+
+    function sichern() {
+      merken();
+      syncAnstossen();
+    }
+
+    // --- Hochladen ---------------------------------------------------------
+    // Der Browser darf nicht ins Repo schreiben. Er stößt deshalb denselben
+    // Workflow an wie der ⟳-Knopf und übergibt seinen Stand als Eingabe; das
+    // Zusammenführen und Ablegen passiert serverseitig.
+    const itcfg = window.DASHCFG || {};
+    const SYNC_GRENZE = 60000;    // Sicherheitsabstand zum Limit der Eingaben
+    const SYNC_ENTPRELLEN = 5000; // erst sammeln, dann einmal senden
+    const SYNC_ABSTAND = 25000;   // nie mehr als ein Lauf je 25 Sekunden
+    const SYNC_MAX = 6;           // Schutz gegen dauerhaft erfolgloses Senden
+    let syncTimer = null, syncLaeuft = false, syncOffen = false;
+    let syncVersuche = 0, syncZuletzt = 0;
+
+    function syncSage(text, warnen) {
+      const el = document.getElementById('itsync');
+      if (!el) return;
+      el.textContent = text || '';
+      el.classList.toggle('warn', !!warnen);
+    }
+
+    function nutzlast() {
+      const s = JSON.stringify(P);
+      if (s.length <= SYNC_GRENZE) return s;
+      // Notbremse: Lektionen und Serie kommen auch ohne Karteikasten durch.
+      return JSON.stringify(Object.assign({}, P, { karten: {} }));
+    }
+
+    async function syncSenden() {
+      clearTimeout(syncTimer);
+      syncTimer = null;
+      if (!itcfg.rt) {
+        syncSage('Fortschritt bleibt auf diesem Gerät – kein Zugriffsschlüssel in der Seite.', true);
+        return;
+      }
+      if (syncLaeuft) { syncOffen = true; return; }
+      if (syncVersuche >= SYNC_MAX) return;
+      syncLaeuft = true;
+      syncVersuche++;
+      syncZuletzt = Date.now();
+      syncSage('Fortschritt wird für alle Geräte gesichert …');
+      try {
+        const r = await fetch('https://api.github.com/repos/' + itcfg.repo +
+                              '/actions/workflows/update.yml/dispatches', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + itcfg.rt,
+                     'Accept': 'application/vnd.github+json' },
+          body: JSON.stringify({ ref: 'main', inputs: { it_progress: nutzlast() } })
+        });
+        if (r.status === 204) {
+          syncVersuche = 0;
+          nachzutragen = false;
+          syncSage('Fortschritt gesichert – andere Geräte sehen ihn beim nächsten Laden.');
+        } else {
+          syncSage('Abgleich nicht möglich (' + r.status + '). Fortschritt bleibt hier gespeichert.', true);
+        }
+      } catch (e) {
+        syncSage('Kein Netz für den Abgleich. Fortschritt bleibt hier gespeichert.', true);
+      }
+      syncLaeuft = false;
+      if (syncOffen) { syncOffen = false; syncAnstossen(); }
+    }
+
+    function syncAnstossen() {
+      if (!itcfg.rt || syncVersuche >= SYNC_MAX) return;
+      nachzutragen = true;
+      // Sofort Bescheid geben, nicht erst wenn der Aufruf rausgeht – sonst
+      // wirkt die Zeile in den ersten Sekunden wie eingeschlafen.
+      syncSage('Fortschritt wird für alle Geräte gesichert …');
+      clearTimeout(syncTimer);
+      const warten = Math.max(SYNC_ENTPRELLEN, SYNC_ABSTAND - (Date.now() - syncZuletzt));
+      syncTimer = setTimeout(syncSenden, warten);
+    }
+
+    // Wer die Seite wegklickt, soll nichts verlieren: was noch wartet, geht
+    // sofort raus. Bleibt doch etwas liegen, holt es der nächste Aufruf nach,
+    // weil dann der eingebackene Stand vom lokalen abweicht.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden' && syncTimer) syncSenden();
+    });
 
     // --- Aussprache über die Sprachausgabe des Browsers -------------------
     let stimmen = [];
@@ -2284,8 +2605,8 @@ IT_JS = '''
       const sdt = satzDesTages();
       const meilen = [12, 24, 36, 48];
 
-      let h = '<div class="srcline">Ein Durchgang: 15–20 Minuten · Fortschritt liegt nur in diesem Browser ' +
-              '(nicht geräteübergreifend) · Aussprache über die Stimme deines Geräts</div>';
+      let h = '<div class="srcline">Ein Durchgang: 15–20 Minuten · Fortschritt gilt auf allen Geräten ' +
+              '· Aussprache über die Stimme deines Geräts</div>';
       h += '<div class="ittop">';
       h += '<div class="itstat"><div class="l">Serie</div><div class="v">' + s +
            (s === 1 ? ' Tag' : ' Tage') + '</div><div class="s">Bester Lauf: ' +
@@ -2751,6 +3072,12 @@ IT_JS = '''
     if (over) over.addEventListener('click', ev => { if (ev.target === over) schliesse(); });
 
     alles();
+
+    // Beim Laden: Weicht der hiesige Stand vom eingebackenen ab, geht er raus.
+    // Das heilt auch abgebrochene Läufe, ohne dass etwas mitgezählt werden muss.
+    if (nachzutragen) syncAnstossen();
+    else if (fernZeit) syncSage('Auf allen Geräten gleich · Stand ' + fernZeit + ' Uhr');
+    else if (!itcfg.rt) syncSage('Fortschritt bleibt auf diesem Gerät.', true);
   })();
 '''
 
@@ -2930,7 +3257,8 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
                weather=None, weather_note=None, day_focus=None, day_focus_note=None,
                news_digest=None, cal_meta=None,
                industry=None, industry_note=None,
-               industry_digest=None, digest_note=None, watch_leagues=None):
+               industry_digest=None, digest_note=None, watch_leagues=None,
+               it_stand=None):
     releases = releases or []
     trello = trello or []
     podcast = podcast or []
@@ -3515,6 +3843,11 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     # Fortschritt, Quiz und Karteikasten laufen komplett im Browser.
     it_course_json = json.dumps(ITALIAN_COURSE, ensure_ascii=False, separators=(",", ":"))
     it_lekt_n = len(ITALIAN_COURSE.get("lektionen") or [])
+    # Der abgeglichene Lernstand aus cache/italiano.json. Er stammt ursprünglich
+    # aus dem Browser, deshalb zusätzlich "<" entschärfen – so kann die Zeile
+    # unter keinen Umständen aus dem Script-Block ausbrechen.
+    it_stand_json = json.dumps(it_stand or {}, ensure_ascii=False,
+                               separators=(",", ":")).replace("<", "\\u003c")
 
     return f'''<!DOCTYPE html>
 <html lang="de">
@@ -3945,6 +4278,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
       <button data-subview="sub-it-kurs">Kurs</button>
       <button data-subview="sub-it-woerter">Vokabeln</button>
     </nav>
+    <div class="itsync" id="itsync"></div>
 
     <div id="sub-it-heute" class="subview active">
       <div class="srcline">Lernbereich wird geladen …</div>
@@ -4162,11 +4496,15 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     setInterval(tick, 30000);
   }})();
 
-  // ---- Italienisch-Kurs: Lernstoff und Logik ----
-  window.ITCORSO = {it_course_json};
-{IT_JS}
-  // Für das Abhaken der Aufgaben: Repo und der bereits vorhandene Actions-Token.
+  // Repo und der bereits vorhandene Actions-Token. Beides brauchen sowohl das
+  // Abhaken der Aufgaben als auch der Geräte-Abgleich des Lernstands, deshalb
+  // steht die Zeile vor beiden Bausteinen.
   window.DASHCFG = {{ repo: {json.dumps(REPO)}, rt: {json.dumps(refresh_token or "")} }};
+
+  // ---- Italienisch-Kurs: Lernstoff, Logik und abgeglichener Stand ----
+  window.ITCORSO = {it_course_json};
+  window.ITSTAND = {it_stand_json};
+{IT_JS}
 {TASK_JS}{refresh_js}
 </script>
 </body>
@@ -4284,6 +4622,12 @@ def main():
     own_brands = _lines_or_commas(os.environ.get("OWN_BRANDS"), OWN_BRANDS_DEFAULT)
     watch_leagues = _lines_or_commas(os.environ.get("WATCH_LEAGUES"), WATCH_LEAGUES_DEFAULT)
 
+    # --- Italienisch: Lernstand über alle Geräte ---------------------------
+    # Kommt ein Stand aus dem Browser mit (IT_SYNC), wird er mit dem
+    # gespeicherten vereinigt und abgelegt. Sonst wird nur gelesen. Läuft ganz
+    # ohne API und ohne neues Geheimnis.
+    it_stand = it_sync(os.environ.get("IT_SYNC"))
+
     if os.environ.get("DASH_TEST") == "1":
         (tasks, done_today, events, cardshows, news, releases, trello, podcast,
          weather, day_focus, news_digest, cal_meta, industry,
@@ -4389,7 +4733,8 @@ def main():
                        podcast, podcast_note, weather, weather_note,
                        day_focus, day_focus_note, news_digest, cal_meta,
                        industry, industry_note,
-                       industry_digest, digest_note, watch_leagues)
+                       industry_digest, digest_note, watch_leagues,
+                       it_stand=it_stand)
     encrypted = encrypt_page(plain, password)
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(encrypted)

@@ -36,7 +36,7 @@ Secrets anlegen (Name exakt so schreiben) – die ersten drei sind Pflicht, der 
 | `ICS_URL` | private iCal-Adresse (dein Hauptkalender) | Google Kalender im Browser → Zahnrad → **Einstellungen** → links unter „Einstellungen für meine Kalender" deinen Kalender anklicken → Abschnitt **„Kalender integrieren"** → **„Privatadresse im iCal-Format"** kopieren |
 | `ICS_URLS` | *(optional)* weitere iCal-Adressen, je eine pro Zeile (oder durch Komma getrennt) | Für zusätzliche Kalender wie „Privat" oder „Feiertage in Deutschland" – siehe „Mehrere Kalender" unten |
 | `HOLIDAY_EXCLUDE` | *(optional)* Termin-/Feiertagsnamen, je einer pro Zeile (oder durch Komma getrennt) | Um bestimmte Termine (z. B. für dich irrelevante regionale Feiertage) dauerhaft auszublenden – siehe „Feiertage/Termine ausblenden" unten |
-| `REFRESH_TOKEN` | *(optional)* Feintoken | Nur für den ⟳-Knopf direkt in der Seite, siehe unten |
+| `REFRESH_TOKEN` | *(optional)* Feintoken | Für den ⟳-Knopf, das Abhaken der Aufgaben und den Geräte-Abgleich des Italienisch-Fortschritts, siehe unten |
 | `TRELLO_KEY` | *(optional)* dein Trello-API-Key | [trello.com/app-key](https://trello.com/app-key) (eingeloggt öffnen) → oben den **Key** kopieren |
 | `TRELLO_TOKEN` | *(optional)* dein Trello-Token | Auf derselben Seite unten auf **„Token"** klicken → Zugriff erlauben → den angezeigten Token kopieren |
 | `ANTHROPIC_API_KEY` | *(optional)* dein Claude-API-Key | [console.anthropic.com](https://console.anthropic.com/) → **Get API Keys** → neuen Key erstellen (eigenes, separates Konto mit Guthaben – siehe unten) |
@@ -55,6 +55,11 @@ Developer settings → Fine-grained tokens → neues Token, **nur** Repo
 Hinweis: Dieses Token wird in die *verschlüsselte* Seite eingebettet –
 lesbar nur für jemanden, der dein Dashboard-Passwort kennt, und selbst dann
 kann man damit ausschließlich die Aktualisierung anstoßen.
+Dasselbe Token trägt inzwischen zwei weitere Bequemlichkeiten: das **Abhaken
+der Aufgaben** (Eingabe `close_tasks`) und den **Geräte-Abgleich des
+Italienisch-Fortschritts** (Eingabe `it_progress`). Beide laufen über denselben
+Workflow-Anstoß, brauchen deshalb kein zusätzliches Secret – ohne
+`REFRESH_TOKEN` bleiben beide einfach lokal auf dem jeweiligen Gerät.
 
 **Zu `TRELLO_KEY`/`TRELLO_TOKEN`:** Ohne diese beiden Secrets baut sich das
 Dashboard trotzdem ganz normal – im Trello-Bereich erscheint dann nur ein
@@ -242,11 +247,28 @@ Listen, die auch tatsächlich Karten enthalten, damit es übersichtlich bleibt.
   Datei `italian_course.py`; sie lässt sich erweitern, ohne das Bau-Skript
   anzufassen, und ist so abgesichert, dass ein Fehler darin das Dashboard nicht
   lahmlegt (der Reiter bleibt dann nur leer).
-  Einschränkung: Der **Fortschritt liegt im Speicher des Browsers**
-  (`localStorage`), in dem du lernst – er übersteht die halbstündigen
-  Neubauten problemlos, wandert aber **nicht** zwischen Geräten. Lerne also
-  am besten immer im selben Browser; im privaten Modus geht der Stand beim
-  Schließen verloren.
+  **Fortschritt auf allen Geräten:** Der Stand liegt weiterhin im Speicher des
+  Browsers (`localStorage`) – das hält den Kurs schnell und offline nutzbar –,
+  wird zusätzlich aber in der Datei `cache/italiano.json` im Repo geführt.
+  Ablauf: Nach einer Änderung (Lektion fertig, Karte bewertet, Richtung
+  umgestellt) stößt die Seite denselben Workflow an wie der ⟳-Knopf und
+  übergibt ihren Stand als Eingabe `it_progress`; der Lauf führt beide Stände
+  zusammen und backt das Ergebnis in die neue Seite. Dafür genügt der schon
+  vorhandene `REFRESH_TOKEN` – **kein neues Secret, keine neue Fremd-API,
+  weiterhin KI-frei**. Zusammengeführt wird *vereinigt*, nicht überschrieben:
+  Erledigte Lektionen beider Geräte bleiben erhalten, bei einer Karteikarte
+  gewinnt das höhere Leitner-Fach (Gelerntes fällt also nie zurück), bei der
+  Serie der spätere Tag, beim Bestwert der höhere. Wer also am Rechner und am
+  Handy unabhängig lernt, verliert nichts.
+  Zwei Dinge dazu im Kopf behalten: Ein anderes Gerät sieht den neuen Stand
+  erst, **nachdem es die Seite neu geladen hat** (⟳-Knopf oder der nächste
+  halbstündige Lauf) – es ist ein Abgleich, keine Live-Verbindung. Und
+  `cache/italiano.json` liegt – wie die übrigen Dateien in `cache/` – **im
+  Klartext** im Repo, anders als die verschlüsselte `index.html`. Darin stehen
+  nur Zahlen und Datumsangaben (Lektionsnummern, Leitner-Fächer,
+  Fälligkeiten, Serienzähler), kein freier Text. Wer auch das nicht öffentlich
+  haben will, sagt Bescheid – die Datei lässt sich genauso verschlüsseln wie
+  die Seite.
 - **Woche – vor/zurück blättern:** Mit den Pfeilen links und rechts der
   Wochenanzeige beliebig weit in vergangene oder zukünftige Wochen blättern;
   „Diese Woche" springt jederzeit zur aktuellen Woche zurück.

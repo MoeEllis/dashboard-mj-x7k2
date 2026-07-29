@@ -9,6 +9,10 @@ on:
         description: "Todoist-IDs zum Abschließen (kommagetrennt; setzt das Dashboard beim Abhaken selbst)"
         required: false
         default: ""
+      it_progress:
+        description: "Italienisch-Lernstand als JSON (setzt das Dashboard beim Lernen selbst)"
+        required: false
+        default: ""
   push:
     branches: [main]
     paths:
@@ -44,6 +48,8 @@ jobs:
           TODOIST_TOKEN: ${{ secrets.TODOIST_TOKEN }}
           # Aufgaben, die im Dashboard abgehakt wurden (leer bei Zeitplan/Push)
           CLOSE_TASKS: ${{ github.event.inputs.close_tasks }}
+          # Italienisch-Lernstand vom Gerät, das gerade gelernt hat (leer bei Zeitplan/Push)
+          IT_SYNC: ${{ github.event.inputs.it_progress }}
           DASH_PASSWORD: ${{ secrets.DASH_PASSWORD }}
           REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
           TRELLO_KEY: ${{ secrets.TRELLO_KEY }}
