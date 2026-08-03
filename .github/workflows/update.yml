@@ -52,6 +52,9 @@ jobs:
           IT_SYNC: ${{ github.event.inputs.it_progress }}
           DASH_PASSWORD: ${{ secrets.DASH_PASSWORD }}
           REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
+          # Übersetzen-Reiter: eigener Cloudflare-Worker vor Claude, kein API-Key hier.
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_TOKEN: ${{ secrets.WORKER_TOKEN }}
           TRELLO_KEY: ${{ secrets.TRELLO_KEY }}
           TRELLO_TOKEN: ${{ secrets.TRELLO_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

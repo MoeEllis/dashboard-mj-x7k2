@@ -1953,14 +1953,18 @@ except Exception as _it_err:            # pragma: no cover - Schutzschicht
 # Stand an (der vorhandene Actions-Token genügt, kein neues Geheimnis), der
 # Lauf führt beide Stände zusammen und backt das Ergebnis in die Seite.
 IT_KARTE_ID = re.compile(r"^[WS][0-9]{1,3}-[0-9]{1,3}$")
+IT_EIGENE_ID = re.compile(r"^U[0-9a-f]{8}$")   # selbst angelegt, z. B. aus dem Übersetzer
 IT_DATUM = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+IT_ZEITSTEMPEL = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$")
 IT_STAND_TXT = re.compile(r"^[0-9.: ]{0,20}$")
 IT_MAX_KARTEN = 4000
+IT_MAX_VERLAUF = 20     # nur Bequemlichkeit (Übersetzungsverlauf) – anders als beim
+                        # Karteikasten darf hier Älteres wortlos rausfallen
 
 
 def _it_leer():
     return {"done": [], "karten": {}, "serie": {"n": 0, "best": 0, "letzter": ""},
-            "tag": {"d": "", "lekt": 0, "karten": 0}, "richtung": "it"}
+            "tag": {"d": "", "lekt": 0, "karten": 0}, "richtung": "it", "verlauf": []}
 
 
 def _it_zahl(v, lo, hi):
@@ -2006,15 +2010,38 @@ def it_clean(raw):
     roh_k = raw.get("karten")
     if isinstance(roh_k, dict):
         for k in sorted(str(x) for x in roh_k.keys())[:IT_MAX_KARTEN]:
-            if not IT_KARTE_ID.match(k):
-                continue
             v = roh_k.get(k)
             if not isinstance(v, dict):
                 continue
             d = _it_datum(v.get("d"))
             if not d:
                 continue
-            karten[k] = {"f": _it_zahl(v.get("f"), 0, 5), "d": d}
+            if IT_KARTE_ID.match(k):
+                karten[k] = {"f": _it_zahl(v.get("f"), 0, 5), "d": d}
+            elif IT_EIGENE_ID.match(k):
+                # Eigene Karte (z. B. aus dem Übersetzer) trägt ihren Inhalt
+                # selbst statt ihn aus dem Kursbuch zu holen – deshalb hier
+                # zusätzlich it/de prüfen, sonst ist die Karte leer.
+                it = str(v.get("it") or "").strip()[:200]
+                de = str(v.get("de") or "").strip()[:200]
+                if it and de:
+                    karten[k] = {"f": _it_zahl(v.get("f"), 0, 5), "d": d, "it": it, "de": de}
+    verlauf = {}
+    roh_v = raw.get("verlauf")
+    if isinstance(roh_v, list):
+        for e in roh_v[:200]:
+            if not isinstance(e, dict):
+                continue
+            q = str(e.get("q") or "").strip()[:800]
+            a = str(e.get("a") or "").strip()[:800]
+            t = str(e.get("t") or "")
+            r = "de" if e.get("r") == "de" else "it" if e.get("r") == "it" else None
+            if not q or not a or not r or not IT_ZEITSTEMPEL.match(t):
+                continue
+            schluessel = (r, q)
+            if schluessel not in verlauf or t > verlauf[schluessel]["t"]:
+                verlauf[schluessel] = {"q": q, "a": a, "r": r, "t": t}
+    verlauf_liste = sorted(verlauf.values(), key=lambda e: (e["t"], e["q"]), reverse=True)[:IT_MAX_VERLAUF]
     serie = raw.get("serie") if isinstance(raw.get("serie"), dict) else {}
     tag = raw.get("tag") if isinstance(raw.get("tag"), dict) else {}
     return {
@@ -2027,6 +2054,7 @@ def it_clean(raw):
                 "lekt": _it_zahl(tag.get("lekt"), 0, 999),
                 "karten": _it_zahl(tag.get("karten"), 0, 9999)},
         "richtung": "de" if raw.get("richtung") == "de" else "it",
+        "verlauf": verlauf_liste,
     }
 
 
@@ -2070,12 +2098,23 @@ def it_merge(alt, neu):
     else:
         tag = dict(tb if tb["d"] > ta["d"] else ta)
 
+    # Verlauf: Union über (Richtung, Ausgangstext), bei Dublette die neuere;
+    # anschließend auf die letzten IT_MAX_VERLAUF kappen. Reine Bequemlichkeit –
+    # anders als beim Karteikasten ist ein Rausfallen hier kein Verlust.
+    vmap = {}
+    for e in a["verlauf"] + b["verlauf"]:
+        schluessel = (e["r"], e["q"])
+        if schluessel not in vmap or e["t"] > vmap[schluessel]["t"]:
+            vmap[schluessel] = e
+    verlauf = sorted(vmap.values(), key=lambda e: (e["t"], e["q"]), reverse=True)[:IT_MAX_VERLAUF]
+
     return {
         "done": sorted(set(a["done"]) | set(b["done"])),
         "karten": karten,
         "serie": {"n": s_n, "best": max(sa["best"], sb["best"], s_n), "letzter": s_letzt},
         "tag": tag,
         "richtung": (b if neu else a)["richtung"],
+        "verlauf": verlauf,
     }
 
 
@@ -2262,6 +2301,57 @@ IT_CSS = '''
   /* Eine ruhige Zeile: sie sagt, ob der Stand über die Geräte hinweg sitzt. */
   .itsync { font-size: 12px; color: var(--muted); margin: -6px 0 14px; min-height: 1em; }
   .itsync.warn { color: var(--bad-text); }
+
+  /* ---- Übersetzen -------------------------------------------------------- */
+  .trbox { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
+           padding: 16px; border-top: 3px solid var(--italiano); }
+  .trdir { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  .trdir .lang { font-size: 13px; font-weight: 650; padding: 5px 12px; border-radius: 8px;
+                 background: var(--page); border: 1px solid var(--border); }
+  .trswap { border: 1px solid var(--border); background: var(--page); color: var(--text-secondary);
+            border-radius: 8px; cursor: pointer; font-size: 14px; padding: 4px 10px; line-height: 1.4; }
+  .trswap:hover { color: var(--italiano); border-color: var(--italiano); }
+  .trdir .sp { margin-left: auto; font-size: 12px; color: var(--muted); }
+  textarea.trin { width: 100%; min-height: 92px; resize: vertical; font: inherit; font-size: 14px;
+                  line-height: 1.55; padding: 11px 12px; border-radius: 10px; color: var(--text-primary);
+                  border: 1px solid var(--border); background: var(--page); }
+  textarea.trin:focus { outline: 2px solid var(--italiano); outline-offset: -1px; }
+  textarea.trin:disabled { opacity: .6; }
+  .trfoot { display: flex; align-items: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+  .trfoot .cnt { font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .trfoot .cnt.over { color: var(--bad-text); }
+  .trfoot .sp { margin-left: auto; font-size: 11.5px; color: var(--muted); }
+  .trres { margin-top: 14px; }
+  .trpair { display: flex; gap: 10px; align-items: flex-start; padding: 10px 0;
+            border-bottom: 1px solid var(--hairline); }
+  .trpair:last-child { border-bottom: none; }
+  .trpair .col { min-width: 0; flex: 1 1 50%; }
+  .trpair .src { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+  .trpair .dst { font-size: 14.5px; color: var(--text-primary); line-height: 1.5; font-weight: 500; }
+  .trpair .acts { flex: none; display: flex; gap: 2px; }
+  .trquelle { font-size: 11.5px; color: var(--muted); margin-top: 10px; }
+  .trquelle.warn { color: var(--bad-text); }
+  .trtools { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .trkurs { margin-top: 14px; background: var(--page); border: 1px solid var(--border);
+            border-left: 3px solid var(--good); border-radius: 10px; padding: 12px 14px; }
+  .trkurs .k-kicker { font-size: 11.5px; color: var(--good-text); text-transform: uppercase;
+                      letter-spacing: .04em; font-weight: 650; margin-bottom: 6px; }
+  .trkurs .k-it { font-size: 15px; font-weight: 650; }
+  .trkurs .k-de { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
+  .trkurs .k-lekt { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .trhist { margin-top: 18px; }
+  .trhist .h-kicker { font-size: 11.5px; color: var(--muted); text-transform: uppercase;
+                      letter-spacing: .04em; margin-bottom: 6px; }
+  .trhist ul { list-style: none; }
+  .trhist li { display: flex; gap: 8px; align-items: baseline; padding: 6px 0;
+               border-bottom: 1px solid var(--hairline); font-size: 12.5px; cursor: pointer; }
+  .trhist li:hover { color: var(--italiano); }
+  .trhist li .h-de { color: var(--muted); flex: 1 1 45%; min-width: 0; overflow: hidden;
+                     text-overflow: ellipsis; white-space: nowrap; }
+  .trhist li .h-it { flex: 1 1 45%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .trnote { font-size: 11.5px; color: var(--muted); margin-top: 12px; line-height: 1.5; }
+  .traus { text-align: center; padding: 24px 0; color: var(--muted); font-size: 13px; }
+  @media (max-width: 640px) { .trpair { flex-wrap: wrap; } .trpair .col { flex: 1 1 100%; } }
 '''
 
 # Der Lernbereich läuft vollständig im Browser: kein Netz, kein API-Schlüssel,
@@ -2279,6 +2369,7 @@ IT_JS = '''
     // Leitner-Kasten: Fach 0 kommt morgen wieder, Fach 5 erst in fünf Wochen.
     const FACH_TAGE = [1, 2, 4, 8, 16, 35];
     const ZIEL_KARTEN = 12;   // Tagesziel, wenn gerade nichts fällig ist
+    const VERLAUF_MAX = 20;   // Übersetzungsverlauf: reine Bequemlichkeit, siehe vereinen()
 
     function heute() {
       const d = new Date();
@@ -2297,7 +2388,7 @@ IT_JS = '''
 
     function leer() {
       return { done: [], karten: {}, serie: { n: 0, best: 0, letzter: '' },
-               tag: { d: '', lekt: 0, karten: 0 }, richtung: 'it' };
+               tag: { d: '', lekt: 0, karten: 0 }, richtung: 'it', verlauf: [] };
     }
     // Jeden Stand – ob aus dem Browser oder vom Server – auf die gleiche Form
     // bringen. Danach darf der Rest des Codes ohne Prüfungen darauf zugreifen.
@@ -2310,13 +2401,27 @@ IT_JS = '''
       if (x.karten && typeof x.karten === 'object') {
         Object.keys(x.karten).forEach(k => {
           const v = x.karten[k];
-          if (v && typeof v === 'object' && v.d) o.karten[k] = { f: v.f | 0, d: String(v.d) };
+          if (!v || typeof v !== 'object' || !v.d) return;
+          const kk = { f: v.f | 0, d: String(v.d) };
+          // Eigene Karten (z. B. aus dem Übersetzer) tragen ihren Inhalt selbst –
+          // Kurskarten holen ihn stattdessen aus dem Kursbuch, siehe kartePaar().
+          if (/^U[0-9a-f]{8}$/.test(k) && v.it && v.de) {
+            kk.it = String(v.it).slice(0, 200);
+            kk.de = String(v.de).slice(0, 200);
+          }
+          o.karten[k] = kk;
         });
       }
       const s = x.serie || {}, t = x.tag || {};
       o.serie = { n: s.n | 0, best: s.best | 0, letzter: String(s.letzter || '') };
       o.tag = { d: String(t.d || ''), lekt: t.lekt | 0, karten: t.karten | 0 };
       o.richtung = x.richtung === 'de' ? 'de' : 'it';
+      if (Array.isArray(x.verlauf)) {
+        o.verlauf = x.verlauf.filter(v => v && typeof v === 'object' && v.q && v.a && v.t)
+          .map(v => ({ q: String(v.q).slice(0, 800), a: String(v.a).slice(0, 800),
+                       r: v.r === 'de' ? 'de' : 'it', t: String(v.t) }))
+          .slice(0, VERLAUF_MAX);
+      }
       return o;
     }
 
@@ -2348,19 +2453,37 @@ IT_JS = '''
       const tag = ta.d === tb.d
         ? { d: ta.d, lekt: Math.max(ta.lekt, tb.lekt), karten: Math.max(ta.karten, tb.karten) }
         : Object.assign({}, tb.d > ta.d ? tb : ta);
+
+      // Verlauf: Union über (Richtung, Ausgangstext), bei Dublette die neuere;
+      // dann auf die letzten VERLAUF_MAX kappen. Dieselbe Regel wie in
+      // it_merge() im Python-Teil – reine Bequemlichkeit, kein Datenverlust
+      // wie beim Karteikasten, älteres darf also wortlos rausfallen.
+      const vmap = {};
+      a.verlauf.concat(b.verlauf).forEach(e => {
+        const schluessel = e.r + '\\u0001' + e.q;
+        if (!vmap[schluessel] || e.t > vmap[schluessel].t) vmap[schluessel] = e;
+      });
+      const verlauf = Object.keys(vmap).map(k => vmap[k])
+        .sort((x, y) => (x.t < y.t ? 1 : x.t > y.t ? -1 : 0)).slice(0, VERLAUF_MAX);
+
       return { done: done, karten: karten,
                serie: { n: sn, best: Math.max(sa.best, sb.best, sn), letzter: sl },
-               tag: tag, richtung: b.richtung };
+               tag: tag, richtung: b.richtung, verlauf: verlauf };
     }
 
     // Fingerabdruck zum Vergleich: Was der Server hat, gegen das, was hier
     // liegt. Die Blickrichtung bleibt außen vor – die ist Gerätesache.
     function abdruck(x) {
       const k = {};
-      Object.keys(x.karten).sort().forEach(id => { k[id] = [x.karten[id].f, x.karten[id].d]; });
+      Object.keys(x.karten).sort().forEach(id => {
+        const c = x.karten[id];
+        k[id] = [c.f, c.d, c.it || '', c.de || ''];
+      });
+      const v = x.verlauf.slice().sort((a, b) => (a.t < b.t ? 1 : a.t > b.t ? -1 : 0))
+        .map(e => [e.r, e.q, e.a, e.t]);
       return JSON.stringify([x.done.slice().sort((a, b) => a - b), k,
                              [x.serie.n, x.serie.best, x.serie.letzter],
-                             [x.tag.d, x.tag.lekt, x.tag.karten]]);
+                             [x.tag.d, x.tag.lekt, x.tag.karten], v]);
     }
 
     let P;
@@ -2514,13 +2637,39 @@ IT_JS = '''
     }
     function kartePaar(id) {
       const m = /^([WS])(\\d+)-(\\d+)$/.exec(id);
-      if (!m) return null;
-      const l = LK.find(x => x.nr === Number(m[2]));
-      if (!l) return null;
-      const arr = m[1] === 'W' ? l.woerter : l.saetze;
-      const p = arr && arr[Number(m[3])];
-      if (!p) return null;
-      return { it: p[0], de: p[1], lekt: l, art: m[1] === 'W' ? 'Wort' : 'Satz' };
+      if (m) {
+        const l = LK.find(x => x.nr === Number(m[2]));
+        if (!l) return null;
+        const arr = m[1] === 'W' ? l.woerter : l.saetze;
+        const p = arr && arr[Number(m[3])];
+        if (!p) return null;
+        return { it: p[0], de: p[1], lekt: l, art: m[1] === 'W' ? 'Wort' : 'Satz' };
+      }
+      // Eigene Karte aus dem Übersetzer: der Inhalt steckt in der Karte selbst,
+      // es gibt kein Kursbuch, aus dem er kommen könnte.
+      const k = P.karten[id];
+      if (/^U[0-9a-f]{8}$/.test(id) && k && k.it && k.de) {
+        return { it: k.it, de: k.de, lekt: null, art: 'Eigene Karte' };
+      }
+      return null;
+    }
+    // ID aus dem Inhalt ableiten: dieselbe Übersetzung bekommt immer dieselbe
+    // Karte, es entstehen also keine Dubletten, egal wie oft man sie anlegt.
+    function eigeneKarteId(it, de) {
+      let h = 0;
+      const s = it + '\\u0001' + de;
+      for (let i = 0; i < s.length; i++) { h = (h * 31 + s.charCodeAt(i)) | 0; }
+      return 'U' + (h >>> 0).toString(16).padStart(8, '0');
+    }
+    function karteAusUebersetzung(it, de) {
+      it = String(it || '').slice(0, 200); de = String(de || '').slice(0, 200);
+      if (!it || !de) return null;
+      const id = eigeneKarteId(it, de);
+      const neu = !P.karten[id];
+      if (neu) P.karten[id] = { f: 0, d: heute(), it: it, de: de };
+      sichern();
+      zeichneWoerter();
+      return { id: id, neu: neu };
     }
     function faellige() {
       const h = heute();
@@ -2733,12 +2882,14 @@ IT_JS = '''
       const q = vocFilter.trim().toLowerCase();
       const zeilen = ids.map(id => ({ id: id, p: kartePaar(id) }))
         .filter(x => !q || x.p.it.toLowerCase().indexOf(q) !== -1 || x.p.de.toLowerCase().indexOf(q) !== -1)
-        .sort((a, b) => a.p.lekt.nr - b.p.lekt.nr || a.p.it.localeCompare(b.p.it));
+        .sort((a, b) => (a.p.lekt ? a.p.lekt.nr : 9999) - (b.p.lekt ? b.p.lekt.nr : 9999)
+                        || a.p.it.localeCompare(b.p.it));
       h += '<div class="itvoc">' + (zeilen.length ? zeilen.map(x =>
         '<div class="itvline">' + tonKnopf(x.p.it) +
         '<span class="v-it">' + esc(x.p.it) + '</span>' +
         '<span class="v-de">' + esc(x.p.de) + '</span>' +
-        '<span class="v-box">L' + x.p.lekt.nr + ' · Fach ' + ((P.karten[x.id].f | 0) + 1) + '</span></div>'
+        '<span class="v-box">' + (x.p.lekt ? 'L' + x.p.lekt.nr : 'Eigen') + ' · Fach ' +
+        ((P.karten[x.id].f | 0) + 1) + '</span></div>'
       ).join('') : '<div class="itempty">Kein Treffer.</div>') + '</div>';
       el.innerHTML = h;
       const inp = document.getElementById('it-voc-q');
@@ -2751,6 +2902,239 @@ IT_JS = '''
           if (n) { n.focus(); try { n.setSelectionRange(pos, pos); } catch (e) {} }
         });
       }
+    }
+
+    // ====================== Übersetzen ======================================
+    // Voller Übersetzer, nicht nur Kursvokabular – über einen eigenen
+    // Cloudflare-Worker, der Claude hinter einem Freigabe-Token verbirgt. Der
+    // API-Schlüssel selbst steht damit nirgends in dieser Seite. Verlauf und
+    // daraus angelegte Karteikarten laufen über denselben Geräte-Abgleich wie
+    // der Rest von P (siehe merken()/sichern()/syncAnstossen() weiter oben).
+    let trRichtung = 'de';   // 'de' = Deutsch -> Italienisch, 'it' = umgekehrt
+    let trLetzte = [];       // Paare der letzten Übersetzung (fürs Kopieren/Karten)
+    let trLaeuft = false;
+
+    // Bevor überhaupt übersetzt wird: steht das schon im eigenen Kurs? Rein
+    // informativ, verändert das Ergebnis nicht.
+    function imKurs(text) {
+      const n = text.trim().toLowerCase().replace(/[.!?,;:"'„“]/g, '');
+      if (!n || n.length > 60) return null;
+      for (const l of LK) {
+        for (const wp of (l.woerter || [])) {
+          const it = wp[0], de = wp[1];
+          if (it.toLowerCase() === n || de.toLowerCase().split(/\\s*[\\/,(]\\s*/).some(x => x.trim() === n))
+            return { it: it, de: de, nr: l.nr, art: 'Vokabel' };
+        }
+        for (const sp of (l.saetze || [])) {
+          const it = sp[0], de = sp[1];
+          const a = it.toLowerCase().replace(/[.!?,;:"'„“]/g, '');
+          const b = de.toLowerCase().replace(/[.!?,;:"'„“]/g, '');
+          if (a === n || b === n) return { it: it, de: de, nr: l.nr, art: 'Satz' };
+        }
+      }
+      return null;
+    }
+
+    function trKopieren(text) {
+      if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+    }
+
+    function trKursZeigen(box, treffer) {
+      if (!box) return;
+      if (!treffer) { box.innerHTML = ''; return; }
+      box.innerHTML = '<div class="trkurs"><div class="k-kicker">Kennst du schon aus deinem Kurs</div>' +
+        '<div class="k-it">' + esc(treffer.it) + '</div>' +
+        '<div class="k-de">' + esc(treffer.de) + '</div>' +
+        '<div class="k-lekt">' + treffer.art + ' aus Lektion ' + treffer.nr + '</div></div>';
+    }
+
+    function trPaareZeigen(el, paare) {
+      const itSeite = trRichtung === 'de' ? 1 : 0;   // welche Spalte ist Italienisch
+      el.innerHTML = paare.map(function (p) {
+        return '<div class="trpair"><div class="col"><div class="src">' + esc(p[0]) +
+          (itSeite === 0 ? ' ' + tonKnopf(p[0]) : '') + '</div><div class="dst">' + esc(p[1]) +
+          (itSeite === 1 ? ' ' + tonKnopf(p[1]) : '') + '</div></div>' +
+          '<button class="cp" data-tr-cp="' + esc(p[1]) + '" title="Übersetzung kopieren">⧉</button></div>';
+      }).join('');
+      el.querySelectorAll('[data-tr-cp]').forEach(btn => {
+        btn.addEventListener('click', () => trKopieren(btn.dataset.trCp));
+      });
+    }
+
+    function trFehlertext(status, daten) {
+      if (status === 401) return 'Der Übersetzer ist noch nicht richtig eingerichtet (Zugriff verweigert).';
+      if (status === 429) return 'Tageslimit des Übersetzers erreicht – morgen wieder. Kurs und ' +
+                                  'Karteikasten laufen unabhängig davon weiter.';
+      if (status === 0) return 'Kein Netz zum Übersetzer.';
+      return (daten && daten.fehler) || ('Übersetzer meldet einen Fehler (' + status + ').');
+    }
+
+    function trVerlaufEintragen(q, a) {
+      q = String(q).slice(0, 800); a = String(a).slice(0, 800);
+      P.verlauf = P.verlauf.filter(e => !(e.r === trRichtung && e.q === q));
+      P.verlauf.unshift({ q: q, a: a, r: trRichtung, t: new Date().toISOString() });
+      P.verlauf = P.verlauf.slice(0, VERLAUF_MAX);
+      sichern();
+      trVerlaufZeigen();
+    }
+
+    function trVerlaufZeigen() {
+      const box = document.getElementById('tr-hist');
+      if (!box) return;
+      if (!P.verlauf.length) { box.innerHTML = ''; return; }
+      let h = '<div class="h-kicker">Zuletzt übersetzt</div><ul>';
+      P.verlauf.forEach((v, i) => {
+        h += '<li data-tr-hist="' + i + '"><span class="h-de">' + esc(v.q) +
+             '</span><span class="h-it">' + esc(v.a) + '</span></li>';
+      });
+      box.innerHTML = h + '</ul>';
+      box.querySelectorAll('[data-tr-hist]').forEach(li => {
+        li.addEventListener('click', () => {
+          const v = P.verlauf[Number(li.dataset.trHist)];
+          const ein = document.getElementById('tr-ein');
+          if (!v || !ein) return;
+          trRichtung = v.r; trRichtungZeigen();
+          ein.value = v.q; trZaehlen();
+          trUebersetzen();
+        });
+      });
+    }
+
+    function trRichtungZeigen() {
+      const el = document.getElementById('sub-it-uebersetzen');
+      if (!el) return;
+      const von = el.querySelector('#tr-von'), nach = el.querySelector('#tr-nach');
+      if (von) von.textContent = trRichtung === 'de' ? 'Deutsch' : 'Italienisch';
+      if (nach) nach.textContent = trRichtung === 'de' ? 'Italienisch' : 'Deutsch';
+    }
+
+    function trZaehlen() {
+      const el = document.getElementById('sub-it-uebersetzen');
+      if (!el) return;
+      const ein = el.querySelector('#tr-ein'), cnt = el.querySelector('#tr-cnt');
+      if (!ein || !cnt) return;
+      const n = ein.value.length;
+      cnt.textContent = n + ' / 3000';
+      cnt.classList.toggle('over', n > 3000);
+    }
+
+    async function trUebersetzen() {
+      const el = document.getElementById('sub-it-uebersetzen');
+      if (!el || trLaeuft) return;
+      const ein = el.querySelector('#tr-ein'), res = el.querySelector('#tr-res'),
+            status = el.querySelector('#tr-status'), tools = el.querySelector('#tr-tools'),
+            kurs = el.querySelector('#tr-kurs');
+      const text = ein.value;
+      if (!text.trim()) return;
+      if (text.length > 3000) {
+        status.className = 'trquelle warn'; status.textContent = 'Höchstens 3000 Zeichen auf einmal.';
+        return;
+      }
+      trLaeuft = true;
+      status.className = 'trquelle'; status.textContent = 'Übersetze …';
+      res.innerHTML = ''; tools.style.display = 'none';
+      trKursZeigen(kurs, imKurs(text));
+      try {
+        const r = await fetch(itcfg.trurl, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ token: itcfg.trtok, text: text, richtung: trRichtung }),
+        });
+        let daten = null;
+        try { daten = await r.json(); } catch (e) {}
+        if (!r.ok || !daten || !daten.ok || !Array.isArray(daten.paare) || !daten.paare.length) {
+          status.className = 'trquelle warn';
+          status.textContent = trFehlertext(r.status, daten);
+          return;
+        }
+        trLetzte = daten.paare;
+        trPaareZeigen(res, trLetzte);
+        tools.style.display = 'flex';
+        status.className = 'trquelle';
+        status.textContent = 'Übersetzt mit Claude · Verlauf gilt auf allen Geräten';
+        trVerlaufEintragen(text, trLetzte.map(p => p[1]).join(' '));
+      } catch (e) {
+        status.className = 'trquelle warn';
+        status.textContent = trFehlertext(0, null);
+      } finally {
+        trLaeuft = false;
+      }
+    }
+
+    function trSchaleBauen() {
+      const el = document.getElementById('sub-it-uebersetzen');
+      if (!el || el.dataset.gebaut === '1') return;
+      el.dataset.gebaut = '1';
+
+      if (!itcfg.trurl || !itcfg.trtok) {
+        el.innerHTML = '<div class="srcline">Freier Übersetzer für Wörter, Sätze und ganze Texte.</div>' +
+          '<div class="traus">Der Übersetzer ist noch nicht eingerichtet – dafür fehlt der ' +
+          'Zugriffsschlüssel in dieser Seite.</div>';
+        return;
+      }
+
+      el.innerHTML =
+        '<div class="srcline">Wort, Satz oder ganzer Text · von Claude satzweise gegenübergestellt ' +
+        '· Verlauf gilt auf allen Geräten.</div>' +
+        '<div class="trbox">' +
+          '<div class="trdir">' +
+            '<span class="lang" id="tr-von">Deutsch</span>' +
+            '<button class="trswap" id="tr-swap" title="Richtung tauschen">⇄</button>' +
+            '<span class="lang" id="tr-nach">Italienisch</span>' +
+          '</div>' +
+          '<textarea class="trin" id="tr-ein" rows="4" placeholder="z. B. „Ich hätte gerne einen ' +
+          'Tisch für zwei Personen um acht Uhr.“ oder ein ganzer Absatz."></textarea>' +
+          '<div class="trfoot">' +
+            '<button class="itbtn" id="tr-los">Übersetzen</button>' +
+            '<button class="itbtn ghost" id="tr-leeren">Leeren</button>' +
+            '<span class="cnt" id="tr-cnt">0 / 3000</span>' +
+            '<span class="sp">Strg + Enter</span>' +
+          '</div>' +
+          '<div class="trres" id="tr-res"></div>' +
+          '<div class="trquelle" id="tr-status"></div>' +
+          '<div class="trtools" id="tr-tools" style="display:none">' +
+            '<button class="itbtn ghost" id="tr-alleskop">Alles kopieren</button>' +
+            '<button class="itbtn ghost" id="tr-karte">★ Als Karteikarte übernehmen</button>' +
+          '</div>' +
+          '<div id="tr-kurs"></div>' +
+          '<div class="trnote">Der Text geht zur Übersetzung an Claude, über einen eigenen, ' +
+          'token-geschützten Zugang – nicht an einen weiteren Drittanbieter. Für vertrauliche ' +
+          'Panini-Inhalte trotzdem besser nicht nutzen.</div>' +
+        '</div>' +
+        '<div class="trhist" id="tr-hist"></div>';
+
+      const ein = el.querySelector('#tr-ein');
+      el.querySelector('#tr-swap').addEventListener('click', () => {
+        trRichtung = trRichtung === 'de' ? 'it' : 'de';
+        trRichtungZeigen();
+      });
+      el.querySelector('#tr-los').addEventListener('click', trUebersetzen);
+      el.querySelector('#tr-leeren').addEventListener('click', () => {
+        ein.value = ''; trZaehlen();
+        el.querySelector('#tr-res').innerHTML = '';
+        el.querySelector('#tr-status').textContent = '';
+        el.querySelector('#tr-kurs').innerHTML = '';
+        el.querySelector('#tr-tools').style.display = 'none';
+        ein.focus();
+      });
+      ein.addEventListener('input', trZaehlen);
+      ein.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) trUebersetzen();
+      });
+      el.querySelector('#tr-alleskop').addEventListener('click', () => {
+        trKopieren(trLetzte.map(p => p[1]).join(' '));
+      });
+      el.querySelector('#tr-karte').addEventListener('click', () => {
+        if (!trLetzte.length) return;
+        const p = trLetzte[0];
+        const it = trRichtung === 'de' ? p[1] : p[0];
+        const de = trRichtung === 'de' ? p[0] : p[1];
+        const r = karteAusUebersetzung(it, de);
+        const status = el.querySelector('#tr-status');
+        if (r && status) status.textContent = (r.neu ? 'Karteikarte angelegt – ' : 'War schon als Karteikarte da – ') +
+                                               'sie erscheint bei Vokabeln und wird mitgelernt.';
+      });
+      trRichtungZeigen(); trZaehlen(); trVerlaufZeigen();
     }
 
     // ====================== Anstoß auf der Übersicht ======================
@@ -2786,7 +3170,10 @@ IT_JS = '''
         (f ? '<button class="itbtn ghost" data-it-train="faellig">' + f + ' Karten</button>' : '');
     }
 
-    function alles() { zeichneAnstoss(); zeichneHeute(); zeichneKurs(); zeichneWoerter(); }
+    function alles() {
+      zeichneAnstoss(); zeichneHeute(); zeichneKurs(); zeichneWoerter();
+      trSchaleBauen(); trVerlaufZeigen();
+    }
 
     // ====================== Lektionsablauf ================================
     const over = document.getElementById('it-over');
@@ -2995,7 +3382,8 @@ IT_JS = '''
         (nachIt ? 'Deutsch → Italienisch' : 'Italienisch → Deutsch') + '</div>' +
         '<div class="tr-front">' + esc(vorn) + (nachIt ? '' : ' ' + tonKnopf(p.it)) + '</div>' +
         '<div class="tr-back">' + (offen ? esc(hinten) + (nachIt ? ' ' + tonKnopf(p.it) : '') : '···') + '</div>' +
-        '<div class="tr-src">' + p.art + ' aus Lektion ' + p.lekt.nr + ' · Fach ' +
+        '<div class="tr-src">' + (p.lekt ? p.art + ' aus Lektion ' + p.lekt.nr
+                                          : p.art + ' · aus dem Übersetzer') + ' · Fach ' +
         (((P.karten[akt] || {}).f | 0) + 1) + '</div>' +
         '<div class="tr-act">' + (offen
           ? '<button class="itbtn ghost" data-it-grade="0">Nochmal</button>' +
@@ -3258,7 +3646,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
                news_digest=None, cal_meta=None,
                industry=None, industry_note=None,
                industry_digest=None, digest_note=None, watch_leagues=None,
-               it_stand=None):
+               it_stand=None, worker_url=None, worker_token=None):
     releases = releases or []
     trello = trello or []
     podcast = podcast or []
@@ -4277,6 +4665,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
       <button class="active" data-subview="sub-it-heute">Heute</button>
       <button data-subview="sub-it-kurs">Kurs</button>
       <button data-subview="sub-it-woerter">Vokabeln</button>
+      <button data-subview="sub-it-uebersetzen">Übersetzen</button>
     </nav>
     <div class="itsync" id="itsync"></div>
 
@@ -4285,6 +4674,7 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
     </div>
     <div id="sub-it-kurs" class="subview"></div>
     <div id="sub-it-woerter" class="subview"></div>
+    <div id="sub-it-uebersetzen" class="subview"></div>
   </div>
 
   <div class="itover" id="it-over"><div class="itsheet" id="it-sheet"></div></div>
@@ -4498,8 +4888,10 @@ def build_html(tasks, done_today, events, cardshows, news, refresh_token,
 
   // Repo und der bereits vorhandene Actions-Token. Beides brauchen sowohl das
   // Abhaken der Aufgaben als auch der Geräte-Abgleich des Lernstands, deshalb
-  // steht die Zeile vor beiden Bausteinen.
-  window.DASHCFG = {{ repo: {json.dumps(REPO)}, rt: {json.dumps(refresh_token or "")} }};
+  // steht die Zeile vor beiden Bausteinen. trurl/trtok gehören zum separaten
+  // Übersetzen-Worker (eigener, enger Zugriffsschlüssel – kein API-Key hier).
+  window.DASHCFG = {{ repo: {json.dumps(REPO)}, rt: {json.dumps(refresh_token or "")},
+                     trurl: {json.dumps(worker_url or "")}, trtok: {json.dumps(worker_token or "")} }};
 
   // ---- Italienisch-Kurs: Lernstoff, Logik und abgeglichener Stand ----
   window.ITCORSO = {it_course_json};
@@ -4608,6 +5000,11 @@ def main():
     if not password:
         sys.exit("FEHLER: Secret DASH_PASSWORD fehlt.")
     refresh_token = (os.environ.get("REFRESH_TOKEN") or "").strip() or None
+    # Übersetzen-Worker (Cloudflare): eigener, enger Zugriffsschlüssel. Ohne
+    # diese beiden bleibt der Übersetzen-Reiter da, meldet aber nur, dass er
+    # noch nicht eingerichtet ist – der Rest des Dashboards ist unberührt.
+    worker_url = (os.environ.get("WORKER_URL") or "").strip() or None
+    worker_token = (os.environ.get("WORKER_TOKEN") or "").strip() or None
     now = datetime.now(TZ)
     today = now.date()
 
@@ -4734,7 +5131,7 @@ def main():
                        day_focus, day_focus_note, news_digest, cal_meta,
                        industry, industry_note,
                        industry_digest, digest_note, watch_leagues,
-                       it_stand=it_stand)
+                       it_stand=it_stand, worker_url=worker_url, worker_token=worker_token)
     encrypted = encrypt_page(plain, password)
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(encrypted)

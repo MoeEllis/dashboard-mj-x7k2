@@ -37,6 +37,8 @@ Secrets anlegen (Name exakt so schreiben) – die ersten drei sind Pflicht, der 
 | `ICS_URLS` | *(optional)* weitere iCal-Adressen, je eine pro Zeile (oder durch Komma getrennt) | Für zusätzliche Kalender wie „Privat" oder „Feiertage in Deutschland" – siehe „Mehrere Kalender" unten |
 | `HOLIDAY_EXCLUDE` | *(optional)* Termin-/Feiertagsnamen, je einer pro Zeile (oder durch Komma getrennt) | Um bestimmte Termine (z. B. für dich irrelevante regionale Feiertage) dauerhaft auszublenden – siehe „Feiertage/Termine ausblenden" unten |
 | `REFRESH_TOKEN` | *(optional)* Feintoken | Für den ⟳-Knopf, das Abhaken der Aufgaben und den Geräte-Abgleich des Italienisch-Fortschritts, siehe unten |
+| `WORKER_URL` | *(optional)* Adresse deines Übersetzen-Workers | Ausgabe von `wrangler deploy` im Ordner `translate-worker/` – siehe „Übersetzen" weiter unten |
+| `WORKER_TOKEN` | *(optional)* selbst ausgedachtes Zufalls-Token | Muss mit dem Wert übereinstimmen, den du dem Worker per `wrangler secret put WORKER_TOKEN` gegeben hast |
 | `TRELLO_KEY` | *(optional)* dein Trello-API-Key | [trello.com/app-key](https://trello.com/app-key) (eingeloggt öffnen) → oben den **Key** kopieren |
 | `TRELLO_TOKEN` | *(optional)* dein Trello-Token | Auf derselben Seite unten auf **„Token"** klicken → Zugriff erlauben → den angezeigten Token kopieren |
 | `ANTHROPIC_API_KEY` | *(optional)* dein Claude-API-Key | [console.anthropic.com](https://console.anthropic.com/) → **Get API Keys** → neuen Key erstellen (eigenes, separates Konto mit Guthaben – siehe unten) |
@@ -224,12 +226,13 @@ Listen, die auch tatsächlich Karten enthalten, damit es übersichtlich bleibt.
   Aufruf täglich (Zwischenspeicher `cache/industry.json`), egal wie oft der
   ⟳-Knopf gedrückt wird. Ohne `ANTHROPIC_API_KEY` bleibt die Rohliste
   vollständig nutzbar, nur die Kurzfassung fehlt.
-- **Italiano (Italienisch-Kurs):** Ein eigener Reiter mit drei Unterreitern.
+- **Italiano (Italienisch-Kurs):** Ein eigener Reiter mit vier Unterreitern.
   **Heute** ist die Startseite: Tagesziel, Serie, fällige Karteikarten und der
   „Satz des Tages". **Kurs** zeigt alle 48 Lektionen in 4 Blöcken à 12
   (Fundament → Alltag → Business-Grundlagen → Feinschliff); jede Lektion ist
   eine Portion von 15–20 Minuten, jede 12. Lektion ein **Meilenstein**, der den
-  Block abfragt. **Vokabeln** ist der Karteikasten. Eine Lektion läuft in fünf
+  Block abfragt. **Vokabeln** ist der Karteikasten. **Übersetzen** ist der
+  freie Übersetzer, siehe eigener Abschnitt weiter unten. Eine Lektion läuft in fünf
   Schritten ab (Wörter → Sätze → Grammatik → Quiz → Sprechen) und öffnet sich
   als Overlay, damit die Seite ruhig bleibt; mit `Esc` jederzeit zu.
   Das **Tagesziel** gilt als erfüllt, sobald entweder eine Lektion
@@ -264,11 +267,58 @@ Listen, die auch tatsächlich Karten enthalten, damit es übersichtlich bleibt.
   erst, **nachdem es die Seite neu geladen hat** (⟳-Knopf oder der nächste
   halbstündige Lauf) – es ist ein Abgleich, keine Live-Verbindung. Und
   `cache/italiano.json` liegt – wie die übrigen Dateien in `cache/` – **im
-  Klartext** im Repo, anders als die verschlüsselte `index.html`. Darin stehen
-  nur Zahlen und Datumsangaben (Lektionsnummern, Leitner-Fächer,
-  Fälligkeiten, Serienzähler), kein freier Text. Wer auch das nicht öffentlich
-  haben will, sagt Bescheid – die Datei lässt sich genauso verschlüsseln wie
-  die Seite.
+  Klartext** im Repo, anders als die verschlüsselte `index.html`. Für den
+  Kursfortschritt selbst (Lektionsnummern, Leitner-Fächer, Fälligkeiten,
+  Serienzähler) sind das nur Zahlen und Datumsangaben, kein freier Text.
+  Seit dem Übersetzer (siehe unten) kommen aber zwei Stellen mit **frei
+  getipptem bzw. übersetztem Text** dazu: der Übersetzungsverlauf (die letzten
+  20 Einträge) und selbst angelegte Karteikarten. Wer nur Alltags- und
+  Business-Sätze zum Italienischlernen übersetzt, ist das unkritisch – für
+  irgendetwas Vertrauliches ist der Übersetzer ohnehin nicht gedacht (siehe
+  unten). Wer auch das nicht öffentlich im Repo stehen haben will, sagt
+  Bescheid – die Datei lässt sich genauso verschlüsseln wie die Seite.
+
+  **Übersetzen:** Freier Übersetzer für Wörter, Sätze oder ganze Texte, in
+  beide Richtungen. Übersetzt wird von Claude – aber der API-Schlüssel selbst
+  darf nirgends in dieser Seite stehen, denn `index.html` ist verschlüsselt,
+  liegt aber öffentlich auf GitHub Pages und wäre damit dauerhaft
+  offline-angreifbar. Deshalb sitzt dazwischen ein eigener, winziger
+  Cloudflare-Worker (Ordner `translate-worker/` in diesem Paket): Er hält den
+  `ANTHROPIC_API_KEY` als eigenes Cloudflare-Secret, prüft ein separates,
+  enges Freigabe-Token und gibt nur die fertige Übersetzung zurück. Ohne
+  diesen Worker bleibt der Reiter da, meldet aber nur „noch nicht
+  eingerichtet" – der Rest des Dashboards ist davon unberührt.
+  Einrichtung (einmalig, per Claude Code auf deinem Rechner, siehe
+  `translate-worker/wrangler.toml`):
+  1. Kostenloses Konto auf [cloudflare.com](https://cloudflare.com) anlegen (falls noch nicht vorhanden).
+  2. Im Ordner `translate-worker/`: `npx wrangler login`, dann `npx wrangler deploy`.
+  3. `npx wrangler secret put ANTHROPIC_API_KEY` (derselbe Schlüssel wie oben bei `ANTHROPIC_API_KEY`, eigenes Konto mit Guthaben).
+  4. `npx wrangler secret put WORKER_TOKEN` – ein selbst ausgedachtes, langes Zufalls-Token (z. B. per Passwortgenerator).
+  5. In den GitHub-Repo-Secrets zwei neue Einträge anlegen: `WORKER_URL` (die Adresse, die `wrangler deploy` ausgibt, z. B. `https://dashboard-mj-translate.<konto>.workers.dev`) und `WORKER_TOKEN` (derselbe Wert wie in Schritt 4).
+  6. Optional, aber empfohlen: `npx wrangler kv namespace create TRANS_LIMIT`, die zurückgegebene `id` in `wrangler.toml` eintragen, den `[[kv_namespaces]]`-Block einkommentieren, erneut `npx wrangler deploy`. Das begrenzt den Worker auf 250 Übersetzungen/Tag – unabhängig von allem anderen ein zusätzlicher Kostendeckel.
+  Kosten: Cloudflare Workers ist im kostenlosen Tarif (100.000 Aufrufe/Tag)
+  mehr als ausreichend für den persönlichen Gebrauch. Für Claude wird das
+  günstigste Modell (Haiku) mit knapper Antwortlänge verwendet; die genauen
+  aktuellen Preise pro Million Tokens findest du unter
+  [docs.claude.com](https://docs.claude.com/en/docs/about-claude/pricing) bzw. deinen tatsächlichen Verbrauch im
+  [Anthropic Console](https://console.anthropic.com/) unter „Usage" – bei normaler
+  Alltagsnutzung ist mit Bruchteilen eines Cents pro Tag zu rechnen, die
+  Tagesbremse aus Schritt 6 deckelt das Worst-Case-Szenario zusätzlich.
+  **Bevor überhaupt übersetzt wird**, schaut die Seite kurz nach, ob genau das
+  Eingegebene schon eine deiner 480 Kursvokabeln oder 240 Kurssätze ist, und
+  zeigt das zusätzlich an („Kennst du schon aus deinem Kurs") – das ist reine
+  Bequemlichkeit und schränkt den Übersetzer selbst nicht ein, er bleibt
+  uneingeschränkt für beliebigen Text nutzbar.
+  Über „★ Als Karteikarte übernehmen" wandert eine Übersetzung direkt in den
+  Leitner-Karteikasten und wird dort mitgelernt wie jede Kursvokabel; dieselbe
+  Übersetzung legt keine Dublette an, sondern findet die vorhandene Karte
+  wieder. Verlauf und selbst angelegte Karteikarten laufen über denselben
+  Geräte-Abgleich wie der übrige Kursfortschritt (siehe oben) – kein
+  zusätzliches Secret dafür nötig, das war schon da.
+  Der eingegebene Text geht ausschließlich an Claude über den eigenen Worker,
+  nicht an einen weiteren Drittanbieter. Für vertrauliche Panini-Inhalte ist
+  der Übersetzer trotzdem nicht gedacht – dafür gilt dieselbe Zurückhaltung
+  wie generell beim Umgang mit Arbeitsinhalten in diesem Dashboard.
 - **Woche – vor/zurück blättern:** Mit den Pfeilen links und rechts der
   Wochenanzeige beliebig weit in vergangene oder zukünftige Wochen blättern;
   „Diese Woche" springt jederzeit zur aktuellen Woche zurück.
